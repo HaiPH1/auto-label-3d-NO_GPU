@@ -1,0 +1,21 @@
+# Secrets — CHUA token/password CVAT, KHONG commit
+config.json
+project_template.yaml
+
+# Data / output
+overlays_v2/
+overlays/
+transfusion_predictions.json
+predictions*.json
+*.pcd
+eval*.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Env
+.venv/
+venv/
+.env
