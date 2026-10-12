@@ -71,6 +71,9 @@ cd "$OPENPCDET_DIR"
 pip install -r requirements.txt
 # --no-build-isolation: build dùng torch trong venv (tránh ModuleNotFoundError: torch)
 pip install -e . --no-build-isolation
+# Patch TorchScript trong Argo2 (kornia mới làm @torch.jit.script fail) — không đụng TransFusion/nuScenes
+sed -i 's/^@torch.jit.script/#@torch.jit.script/' \
+  "$OPENPCDET_DIR/pcdet/datasets/argo2/argo2_utils/so3.py" || true
 
 mkdir -p "$CKPT_DIR"
 [ -f "$CKPT_FILE" ] || gdown "$CKPT_GDRIVE_ID" -O "$CKPT_FILE"
