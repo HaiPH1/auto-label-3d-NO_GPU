@@ -45,7 +45,7 @@ sudo -E docker compose up -d
 echo "Chờ CVAT khởi động..."; sleep 45
 
 # Tạo superuser không tương tác
-sudo docker compose exec -T cvat_server python3 ~/manage.py shell -c "\
+sudo docker compose exec -T cvat_server python3 /home/django/manage.py shell -c "\
 from django.contrib.auth import get_user_model; U=get_user_model(); \
 u,_=U.objects.get_or_create(username='$CVAT_USER', defaults={'email':'$CVAT_EMAIL'}); \
 u.is_superuser=True; u.is_staff=True; u.set_password('$CVAT_PASS'); u.save(); \
@@ -67,7 +67,8 @@ if [ ! -d "$OPENPCDET_DIR" ]; then
 fi
 cd "$OPENPCDET_DIR"
 pip install -r requirements.txt
-python setup.py develop
+# --no-build-isolation: build dùng torch trong venv (tránh ModuleNotFoundError: torch)
+pip install -e . --no-build-isolation
 
 mkdir -p "$CKPT_DIR"
 [ -f "$CKPT_FILE" ] || gdown "$CKPT_GDRIVE_ID" -O "$CKPT_FILE"
