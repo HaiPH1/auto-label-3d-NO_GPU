@@ -55,7 +55,8 @@ print('CVAT user ready:', u.username)" \
 
 # ---- 3. Inference env + checkpoint ------------------------------------------
 log "[3/3] Cài PyTorch cu124 + spconv + OpenPCDet + checkpoint..."
-sudo apt-get install -y git build-essential cmake libboost-all-dev python3-venv >/dev/null 2>&1 || true
+sudo apt-get install -y git build-essential cmake libboost-all-dev python3-venv \
+  libgl1 libglib2.0-0 >/dev/null 2>&1 || true   # libgl1: OpenCV cần libGL.so.1 trên server headless
 python3 -m venv "$VENV_DIR"
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
