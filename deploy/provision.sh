@@ -40,8 +40,9 @@ if [ ! -d "$HOME/cvat" ]; then
   git clone https://github.com/cvat-ai/cvat.git "$HOME/cvat"
 fi
 cd "$HOME/cvat"
-export CVAT_HOST="$CVAT_HOST"
-sudo -E docker compose up -d
+# Ghi CVAT_HOST vào .env (sudo -E hay nuốt biến môi trường)
+grep -q '^CVAT_HOST=' .env 2>/dev/null || echo "CVAT_HOST=$CVAT_HOST" >> .env
+sudo docker compose up -d
 echo "Chờ CVAT khởi động..."; sleep 45
 
 # Tạo superuser không tương tác
