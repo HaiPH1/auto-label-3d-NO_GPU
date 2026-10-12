@@ -338,7 +338,13 @@ def run_inference(pcd_dir, output_path):
     from pathlib import Path
 
     cfg_file = os.path.join(OPENPCDET_DIR, TRANSFUSION_CFG)
-    cfg_from_yaml_file(cfg_file, cfg)
+    # Config OpenPCDet dùng _BASE_CONFIG_ là đường dẫn tương đối với tools/ -> chdir khi nạp
+    _old_cwd = os.getcwd()
+    os.chdir(os.path.join(OPENPCDET_DIR, "tools"))
+    try:
+        cfg_from_yaml_file(cfg_file, cfg)
+    finally:
+        os.chdir(_old_cwd)
     class_names = cfg.CLASS_NAMES
 
     class PCDDataset(DatasetTemplate):
