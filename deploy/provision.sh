@@ -75,6 +75,9 @@ pip install -e . --no-build-isolation
 sed -i 's/^@torch.jit.script/#@torch.jit.script/' \
   "$OPENPCDET_DIR/pcdet/datasets/argo2/argo2_utils/so3.py" || true
 
+# QUAN TRỌNG: numpy 2.x làm cumm/spconv crash (SIGFPE chia 0) lúc voxel hóa -> ép numpy<2
+pip install "numpy<2"
+
 mkdir -p "$CKPT_DIR"
 [ -f "$CKPT_FILE" ] || gdown "$CKPT_GDRIVE_ID" -O "$CKPT_FILE"
 

@@ -199,6 +199,9 @@ const badge = document.getElementById('badge');
 const resultLink = document.getElementById('resultLink');
 const again = document.getElementById('again');
 
+// Mặc định CVAT URL = chính server này (dùng hostname đang truy cập) để khỏi lỗi Host 404
+document.querySelector('input[name=cvat_url]').value = location.protocol + '//' + location.hostname + ':8080';
+
 function fixUrl(u){ try { return u.replace('localhost', location.hostname); } catch(e){ return u; } }
 
 f.addEventListener('submit', async (e) => {
