@@ -62,7 +62,7 @@ python3 -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 pip install -U pip wheel setuptools
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-pip install spconv-cu120 gdown pyyaml numba scipy opencv-python requests open3d kornia cvat-sdk
+pip install spconv-cu120 gdown pyyaml numba scipy opencv-python requests open3d kornia cvat-sdk av2
 
 if [ ! -d "$OPENPCDET_DIR" ]; then
   git clone https://github.com/open-mmlab/OpenPCDet.git "$OPENPCDET_DIR"
