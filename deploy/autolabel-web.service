@@ -1,0 +1,13 @@
+[Unit]
+Description=Auto Label 3D Web Portal
+After=network.target
+
+[Service]
+User=phamhaisen
+WorkingDirectory=/home/phamhaisen/auto-label-3d/webapp
+ExecStart=/home/phamhaisen/venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
