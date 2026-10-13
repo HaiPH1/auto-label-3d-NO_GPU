@@ -57,18 +57,22 @@ def find_data_dir(root):
 
 def run_job(job_id, data_dir, cvat_url, user, password, task_name):
     job = JOBS[job_id]
+    logf = os.path.join(JOBS_DIR, job_id, "run.log")
     cmd = [VENV_PY, RUN_PY, "--url", cvat_url, "--user", user,
            "--password", password, "--task-name", task_name, "--data", data_dir]
     try:
-        proc = subprocess.Popen(cmd, cwd=os.path.dirname(RUN_PY),
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, bufsize=1)
-        for line in proc.stdout:
-            job["log"] += line
-            m = re.search(r"https?://\S+/tasks/\d+/jobs/\d+", line)
-            if m:
-                job["task_url"] = m.group(0)
-        proc.wait()
+        with open(logf, "w") as lf:
+            proc = subprocess.Popen(cmd, cwd=os.path.dirname(RUN_PY),
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, bufsize=1)
+            for line in proc.stdout:
+                job["log"] += line
+                lf.write(line)
+                lf.flush()
+                m = re.search(r"https?://\S+/tasks/\d+/jobs/\d+", line)
+                if m:
+                    job["task_url"] = m.group(0)
+            proc.wait()
         job["status"] = "done" if proc.returncode == 0 else "error"
     except Exception as e:  # noqa: BLE001
         job["log"] += f"\n>>> LỖI backend: {e}\n"
@@ -122,7 +126,7 @@ async def index(request: Request):
 
 
 @app.post("/jobs")
-async def create_job(request: Request, task_name: str = Form(...),
+def create_job(request: Request, task_name: str = Form(...),
                      cvat_url: str = Form(CVAT_URL), cvat_user: str = Form(CVAT_USER),
                      cvat_pass: str = Form(CVAT_PASS), file: UploadFile = File(...)):
     if not authed(request):
@@ -159,7 +163,7 @@ async def job_status(request: Request, job_id: str):
 
 
 @app.get("/api/stats")
-async def api_stats(request: Request):
+def api_stats(request: Request):
     if not authed(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
@@ -173,7 +177,7 @@ async def api_stats(request: Request):
 
 
 @app.get("/api/team")
-async def api_team(request: Request):
+def api_team(request: Request):
     if not authed(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
