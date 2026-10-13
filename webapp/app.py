@@ -782,3 +782,13 @@ _CLOUD_JS = """
 
 LOGIN_HTML = LOGIN_HTML.replace("__CLOUD__", _CLOUD_JS)
 APP_HTML = APP_HTML.replace("__CLOUD__", _CLOUD_JS)
+
+# === Giao diện mới (Perception Lab) nạp từ file nếu có — ghi đè bản cũ ở trên ===
+_HERE = os.path.dirname(os.path.abspath(__file__))
+try:
+    with open(os.path.join(_HERE, "login.html"), encoding="utf-8") as _f:
+        LOGIN_HTML = _f.read()
+    with open(os.path.join(_HERE, "app.html"), encoding="utf-8") as _f:
+        APP_HTML = _f.read()
+except OSError:
+    pass

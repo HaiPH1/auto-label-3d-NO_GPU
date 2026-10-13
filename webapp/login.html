@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LiDAR3D · Perception Lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">
+<style>
+:root{--ink:#e8eefb;--muted:#8ea3c8;--dim:#5f7296;--cyan:#22d3ee;--indigo:#6366f1;--line:rgba(120,170,230,.16);--red:#f87171}
+*{box-sizing:border-box}
+body{margin:0;height:100vh;font-family:Inter,system-ui,sans-serif;color:var(--ink);background:#05080f;overflow:hidden}
+#bg{position:fixed;inset:0;z-index:0}
+#bgfx{position:fixed;inset:0;z-index:1;pointer-events:none;background:
+ radial-gradient(900px 600px at 80% 0%,rgba(99,102,241,.18),transparent 60%),
+ radial-gradient(700px 500px at 10% 100%,rgba(34,211,238,.12),transparent 55%);}
+.wrap{position:relative;z-index:2;height:100vh;display:grid;place-items:center;padding:20px}
+.card{width:400px;max-width:100%;background:rgba(13,20,38,.72);backdrop-filter:blur(16px);
+ border:1px solid var(--line);border-radius:22px;padding:38px 34px;box-shadow:0 30px 80px rgba(0,0,0,.6);position:relative;overflow:hidden}
+.card::before{content:"";position:absolute;top:0;left:30px;right:30px;height:1px;background:linear-gradient(90deg,transparent,rgba(34,211,238,.6),transparent)}
+.brand{display:flex;align-items:center;gap:13px;margin-bottom:6px}
+.cube{width:40px;height:40px;border-radius:11px;background:linear-gradient(135deg,var(--cyan),var(--indigo));
+ display:grid;place-items:center;font-size:20px;box-shadow:0 0 26px rgba(34,211,238,.45)}
+.brand b{font-size:1.45rem;font-weight:800;letter-spacing:-.4px}.brand span{color:var(--cyan)}
+.tag{color:var(--dim);font-size:.68rem;letter-spacing:3px;font-weight:600;margin:4px 0 26px}
+label{display:block;font-size:.78rem;color:var(--muted);margin:16px 0 6px;font-weight:600}
+input{width:100%;padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:rgba(5,8,15,.8);color:var(--ink);font-size:.95rem}
+input:focus{outline:none;border-color:var(--cyan);box-shadow:0 0 0 3px rgba(34,211,238,.12)}
+.btn{width:100%;margin-top:24px;padding:13px;border:0;border-radius:12px;font-weight:700;font-size:1rem;cursor:pointer;
+ color:#04121c;background:linear-gradient(120deg,var(--cyan),var(--indigo));box-shadow:0 8px 28px rgba(34,211,238,.32)}
+.btn:hover{transform:translateY(-1px)}
+.err{color:var(--red);font-size:.82rem;margin-top:12px;min-height:16px}
+.foot{margin-top:18px;color:var(--dim);font-size:.72rem;text-align:center}
+.foot .mono{font-family:'JetBrains Mono',monospace;color:var(--muted)}
+</style>
+</head>
+<body>
+<canvas id="bg"></canvas><div id="bgfx"></div>
+<div class="wrap">
+ <form class="card" method="post" action="/login">
+  <div class="brand"><div class="cube">◈</div><div><b>LiDAR<span>3D</span></b></div></div>
+  <div class="tag">AUTONOMOUS DRIVING · PERCEPTION LAB</div>
+  <label>Tài khoản</label><input name="username" value="admin" autofocus>
+  <label>Mật khẩu</label><input name="password" type="password" placeholder="••••••••">
+  <button class="btn">Đăng nhập</button>
+  <div class="err" id="err"></div>
+  <div class="foot">Hệ thống AI auto-labeling LiDAR 3D · <span class="mono">TransFusion / GPU</span></div>
+ </form>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+if(location.search.indexOf('e=1')>=0)document.getElementById('err').textContent='Sai tài khoản hoặc mật khẩu';
+(function(){const cv=document.getElementById('bg');if(!window.THREE)return;
+ const rn=new THREE.WebGLRenderer({canvas:cv,antialias:true,alpha:true});rn.setPixelRatio(Math.min(devicePixelRatio,2));
+ const W=()=>innerWidth,H=()=>innerHeight;rn.setSize(W(),H(),false);
+ const sc=new THREE.Scene();sc.fog=new THREE.FogExp2(0x05080f,.015);
+ const cam=new THREE.PerspectiveCamera(60,W()/H(),.1,400);cam.position.set(0,16,34);
+ sc.add(new THREE.GridHelper(100,50,0x18324e,0x0d1b2e));
+ const objs=[[-16,-12,'car'],[13,9,'truck'],[-9,17,'ped'],[19,-16,'car'],[0,-25,'cyclist'],[-22,5,'car'],[10,23,'ped']];
+ const N=5000,p=new Float32Array(N*3),c=new Float32Array(N*3);
+ for(let i=0;i<N;i++){let x,z,y;const r=Math.random();
+  if(r<.72){const a=Math.random()*6.283,d=Math.sqrt(Math.random())*44;x=Math.cos(a)*d;z=Math.sin(a)*d;y=Math.random()*.5;}
+  else{const o=objs[Math.floor(Math.random()*objs.length)];x=o[0]+(Math.random()-.5)*4;z=o[1]+(Math.random()-.5)*4;y=Math.random()*(o[2]==='truck'?3.4:o[2]==='ped'?1.8:2);}
+  p[i*3]=x;p[i*3+1]=y;p[i*3+2]=z;const t=Math.min(1,y/3.4);c[i*3]=.12+t*.55;c[i*3+1]=.72+t*.28;c[i*3+2]=.96;}
+ const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(p,3));g.setAttribute('color',new THREE.BufferAttribute(c,3));
+ sc.add(new THREE.Points(g,new THREE.PointsMaterial({size:.14,vertexColors:true,transparent:true,opacity:.9})));
+ const CL={car:0x22d3ee,truck:0x3b82f6,ped:0xa855f7,cyclist:0x34d399},SZ={car:[4.2,2,1.8],truck:[6.4,2.6,3],ped:[.9,.9,1.8],cyclist:[1.8,.8,1.7]};
+ objs.forEach(o=>{const s=SZ[o[2]];const e=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(s[0],s[2],s[1])),new THREE.LineBasicMaterial({color:CL[o[2]]}));e.position.set(o[0],s[2]/2,o[1]);sc.add(e);});
+ const sg=new THREE.PlaneGeometry(44,.09);sg.translate(22,0,0);sg.rotateX(-Math.PI/2);
+ const sw=new THREE.Mesh(sg,new THREE.MeshBasicMaterial({color:0x22d3ee,transparent:true,opacity:.5}));sw.position.y=.12;sc.add(sw);
+ let a=0;function loop(){a+=.0012;cam.position.x=Math.sin(a)*36;cam.position.z=Math.cos(a)*36;cam.lookAt(0,2,0);sw.rotation.z-=.015;rn.render(sc,cam);requestAnimationFrame(loop);}loop();
+ addEventListener('resize',()=>{rn.setSize(W(),H(),false);cam.aspect=W()/H();cam.updateProjectionMatrix();});
+})();
+</script>
+</body>
+</html>

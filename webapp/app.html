@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LiDAR3D · Perception Lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+ --bg:#05080f; --bg2:#070c18; --glass:rgba(16,26,46,.55); --glass2:rgba(20,32,56,.6);
+ --line:rgba(120,170,230,.14); --line2:rgba(120,170,230,.28);
+ --ink:#e8eefb; --muted:#8ea3c8; --dim:#5f7296;
+ --cyan:#22d3ee; --blue:#3b82f6; --indigo:#6366f1; --purple:#a855f7; --green:#34d399;
+ --amber:#fbbf24; --red:#f87171;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;font-family:Inter,system-ui,sans-serif;color:var(--ink);background:var(--bg);overflow:hidden}
+.mono{font-family:'JetBrains Mono',ui-monospace,monospace}
+a{color:var(--cyan);text-decoration:none}
+::-webkit-scrollbar{width:9px;height:9px}::-webkit-scrollbar-thumb{background:#1c2c48;border-radius:6px}
+/* ambient background */
+#bgfx{position:fixed;inset:0;z-index:0;background:
+  radial-gradient(900px 600px at 78% -10%, rgba(99,102,241,.16), transparent 60%),
+  radial-gradient(800px 600px at 0% 100%, rgba(34,211,238,.12), transparent 55%),
+  linear-gradient(180deg,#05080f,#060b16);}
+#bgfx::after{content:"";position:absolute;inset:0;background-image:
+  linear-gradient(rgba(120,170,230,.045) 1px,transparent 1px),
+  linear-gradient(90deg,rgba(120,170,230,.045) 1px,transparent 1px);
+  background-size:46px 46px;mask:radial-gradient(circle at 50% 40%,#000,transparent 85%);}
+/* layout */
+.app{position:relative;z-index:1;display:grid;grid-template-columns:248px 1fr;height:100vh}
+.rail{background:linear-gradient(180deg,rgba(9,15,28,.9),rgba(7,12,24,.78));border-right:1px solid var(--line);
+  backdrop-filter:blur(14px);display:flex;flex-direction:column;padding:20px 16px}
+.brand{display:flex;align-items:center;gap:11px;padding:4px 8px 22px}
+.brand .cube{width:32px;height:32px;border-radius:9px;background:linear-gradient(135deg,var(--cyan),var(--indigo));
+  display:grid;place-items:center;box-shadow:0 0 22px rgba(34,211,238,.4);font-size:17px}
+.brand b{font-size:1.12rem;font-weight:800;letter-spacing:-.3px}
+.brand span{color:var(--cyan)}
+.brand small{display:block;color:var(--dim);font-size:.64rem;letter-spacing:2px;font-weight:600;margin-top:1px}
+.navs{display:flex;flex-direction:column;gap:4px;margin-top:6px}
+.nav{display:flex;align-items:center;gap:12px;padding:11px 13px;border-radius:11px;color:var(--muted);
+  cursor:pointer;font-weight:600;font-size:.92rem;position:relative;transition:.18s}
+.nav svg{width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:1.7}
+.nav:hover{background:rgba(120,170,230,.06);color:var(--ink)}
+.nav.on{background:linear-gradient(90deg,rgba(34,211,238,.14),rgba(99,102,241,.06));color:#fff}
+.nav.on::before{content:"";position:absolute;left:0;top:9px;bottom:9px;width:3px;border-radius:3px;
+  background:linear-gradient(var(--cyan),var(--indigo));box-shadow:0 0 12px var(--cyan)}
+.rail .foot{margin-top:auto;padding-top:14px;border-top:1px solid var(--line);font-size:.78rem;color:var(--muted)}
+.stat-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);
+  box-shadow:0 0 8px var(--green);margin-right:7px;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.foot a{color:var(--muted);display:inline-flex;gap:6px;margin-top:12px}
+.foot a:hover{color:var(--cyan)}
+/* main */
+main{overflow-y:auto;padding:22px 30px 40px}
+.topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px;flex-wrap:wrap;gap:12px}
+.ptitle h1{margin:0;font-size:1.5rem;font-weight:800;letter-spacing:-.4px}
+.ptitle p{margin:3px 0 0;color:var(--muted);font-size:.86rem}
+.chips{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:7px;padding:7px 13px;border-radius:999px;font-size:.76rem;font-weight:600;
+  background:var(--glass);border:1px solid var(--line);color:var(--muted);backdrop-filter:blur(8px)}
+.chip .d{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s infinite}
+.btn{border:0;border-radius:11px;padding:11px 20px;font-weight:700;font-size:.92rem;cursor:pointer;color:#04121c;
+  background:linear-gradient(120deg,var(--cyan),var(--indigo));box-shadow:0 6px 24px rgba(34,211,238,.26);transition:.18s}
+.btn:hover{transform:translateY(-1px);box-shadow:0 10px 30px rgba(34,211,238,.4)}
+.btn:disabled{opacity:.55;cursor:not-allowed;transform:none;box-shadow:none}
+.btn.ghost{background:var(--glass);color:var(--ink);border:1px solid var(--line2);box-shadow:none}
+.btn.ghost:hover{background:rgba(120,170,230,.1)}
+/* cards / glass */
+.glass{background:var(--glass);border:1px solid var(--line);border-radius:18px;backdrop-filter:blur(14px);position:relative;overflow:hidden}
+.glass::before{content:"";position:absolute;top:0;left:22px;right:22px;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(34,211,238,.5),transparent)}
+.pad{padding:22px}
+.sec{display:none;animation:fade .3s ease}
+.sec.on{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.hdr{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.hdr .bar{width:4px;height:17px;border-radius:3px;background:linear-gradient(var(--cyan),var(--indigo))}
+.hdr b{font-size:1rem;font-weight:700}
+.sub{color:var(--muted);font-size:.84rem;margin:0 0 4px}
+label{display:block;font-size:.78rem;color:var(--muted);margin:14px 0 6px;font-weight:600;letter-spacing:.2px}
+input,select,textarea{width:100%;padding:11px 13px;border-radius:11px;border:1px solid var(--line);
+  background:rgba(6,11,22,.7);color:var(--ink);font-size:.93rem;font-family:inherit;transition:.15s}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--cyan);box-shadow:0 0 0 3px rgba(34,211,238,.12)}
+textarea{resize:vertical}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+details summary{cursor:pointer;color:var(--cyan);font-size:.84rem;margin-top:10px;font-weight:600}
+/* 3D viewport */
+.viewport{position:relative;height:430px;border-radius:18px;overflow:hidden;border:1px solid var(--line2);margin-bottom:20px;
+  box-shadow:inset 0 0 90px rgba(0,0,0,.6)}
+.viewport canvas{position:absolute;inset:0}
+.vp-scan{position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,rgba(34,211,238,.035) 0 2px,transparent 2px 4px);mix-blend-mode:screen}
+.vp-br{position:absolute;width:22px;height:22px;border:2px solid rgba(34,211,238,.6)}
+.vp-br.tl{top:14px;left:14px;border-right:0;border-bottom:0}.vp-br.tr{top:14px;right:14px;border-left:0;border-bottom:0}
+.vp-br.bl{bottom:14px;left:14px;border-right:0;border-top:0}.vp-br.br{bottom:14px;right:14px;border-left:0;border-top:0}
+.vp-tag{position:absolute;top:16px;left:48px;font-size:.72rem;letter-spacing:2px;font-weight:700;color:var(--cyan);display:flex;align-items:center;gap:7px}
+.vp-tag .rec{width:8px;height:8px;border-radius:50%;background:var(--red);box-shadow:0 0 9px var(--red);animation:pulse 1.4s infinite}
+.vp-legend{position:absolute;bottom:16px;left:20px;display:flex;gap:16px;flex-wrap:wrap;font-size:.74rem;color:var(--muted)}
+.vp-legend i{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+.vp-hud{position:absolute;top:16px;right:20px;text-align:right;font-size:.72rem;color:var(--dim)}
+.vp-hud b{color:var(--cyan);font-size:.9rem}
+/* tiles */
+.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}
+.tile{background:var(--glass);border:1px solid var(--line);border-radius:15px;padding:17px 18px;position:relative;overflow:hidden}
+.tile .ic{position:absolute;top:14px;right:14px;opacity:.5}.tile .ic svg{width:22px;height:22px;stroke:var(--cyan);fill:none;stroke-width:1.6}
+.tile .n{font-size:1.9rem;font-weight:800;font-family:'JetBrains Mono',monospace;line-height:1}
+.tile .l{color:var(--muted);font-size:.78rem;margin-top:7px}
+.tile.accent .n{color:var(--cyan)}
+/* pipeline stepper */
+.pipe{display:flex;align-items:center;gap:0;flex-wrap:wrap}
+.pstep{display:flex;align-items:center;gap:10px;padding:10px 16px;color:var(--muted);font-size:.84rem;font-weight:600}
+.pstep .num{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;font-size:.78rem;
+  background:rgba(34,211,238,.12);color:var(--cyan);border:1px solid var(--line2)}
+.pstep .arr{color:var(--dim);margin:0 2px}
+/* upload drop */
+.drop{border:1.5px dashed var(--line2);border-radius:14px;padding:26px;text-align:center;cursor:pointer;transition:.18s;background:rgba(6,11,22,.4)}
+.drop:hover,.drop.hl{border-color:var(--cyan);background:rgba(34,211,238,.05)}
+.drop .big{font-size:1.9rem}.drop .t{font-weight:600;margin-top:8px}.drop .s{color:var(--muted);font-size:.8rem;margin-top:3px}
+.drop input{display:none}
+.fname{margin-top:10px;font-size:.82rem;color:var(--cyan)}
+/* progress */
+.pstat{font-size:.85rem;color:var(--cyan);margin:12px 0 7px;font-weight:600}
+.bar{height:9px;background:#13203a;border-radius:6px;overflow:hidden;border:1px solid var(--line)}
+.bar>i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--indigo));transition:width .2s}
+@keyframes shim{0%{background-position:-240px 0}100%{background-position:240px 0}}
+.bar.proc>i{width:100%!important;background:linear-gradient(90deg,#13203a,var(--cyan),#13203a);background-size:240px 100%;animation:shim 1.1s infinite linear}
+.badge{display:inline-block;padding:4px 12px;border-radius:999px;font-size:.76rem;font-weight:700}
+.b-run{background:rgba(34,211,238,.16);color:var(--cyan)}.b-ok{background:rgba(52,211,153,.18);color:var(--green)}.b-err{background:rgba(248,113,113,.18);color:var(--red)}
+#log,#ev_log{background:#040810;border:1px solid var(--line);border-radius:11px;padding:12px;font-family:'JetBrains Mono',monospace;
+  font-size:.74rem;white-space:pre-wrap;max-height:300px;overflow:auto;color:#9fc0e6}
+.result{display:inline-flex;gap:7px;align-items:center;margin-top:13px;padding:11px 18px;border-radius:11px;
+  background:linear-gradient(120deg,var(--green),#10b981);color:#042017;font-weight:700}
+/* table */
+table{width:100%;border-collapse:collapse;font-size:.88rem}
+th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--line)}
+th{color:var(--dim);font-weight:600;font-size:.76rem;letter-spacing:.5px;text-transform:uppercase}
+td .ava{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,var(--indigo),var(--purple));
+  font-size:.76rem;font-weight:700;margin-right:9px;vertical-align:-9px;color:#fff}
+.minibar{height:6px;background:#13203a;border-radius:4px;overflow:hidden;width:120px;display:inline-block;vertical-align:middle}
+.minibar>i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--green))}
+pre.out{margin-top:11px;color:#9fc0e6;font-size:.78rem;white-space:pre-wrap;font-family:'JetBrains Mono',monospace}
+.hidden{display:none}.hint{font-size:.76rem;color:var(--dim);margin-top:7px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}
+/* responsive */
+@media(max-width:900px){
+ .app{grid-template-columns:1fr}
+ .rail{flex-direction:row;align-items:center;height:auto;padding:12px 14px;overflow-x:auto}
+ .rail .foot,.brand small{display:none}.navs{flex-direction:row}.nav.on::before{display:none}
+ main{padding:18px 16px}.tiles{grid-template-columns:repeat(2,1fr)}.row2,.grid2{grid-template-columns:1fr}
+ .viewport{height:320px}
+}
+</style>
+</head>
+<body>
+<div id="bgfx"></div>
+<div class="app">
+ <aside class="rail">
+  <div class="brand"><div class="cube">◈</div><div><b>LiDAR<span>3D</span></b><small>PERCEPTION LAB</small></div></div>
+  <nav class="navs">
+   <div class="nav on" data-s="dash"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>Dashboard</div>
+   <div class="nav" data-s="auto"><svg viewBox="0 0 24 24"><path d="M12 2l9 5v10l-9 5-9-5V7z"/><path d="M12 12l9-5M12 12v10M12 12L3 7"/></svg>Auto-label</div>
+   <div class="nav" data-s="assign"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 21c0-3 3-5 6-5s6 2 6 5"/><path d="M17 11l2 2 4-4"/></svg>Phân công</div>
+   <div class="nav" data-s="team"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 4v16"/></svg>Nhóm</div>
+   <div class="nav" data-s="eval"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1"/></svg>Đánh giá</div>
+  </nav>
+  <div class="foot">
+   <div><span class="stat-dot"></span>GPU <b style="color:var(--ink)">L4</b> · Online</div>
+   <div style="margin-top:8px"><span class="stat-dot"></span>CVAT · Online</div>
+   <a href="/logout"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/></svg>Đăng xuất</a>
+  </div>
+ </aside>
+
+ <main>
+  <div class="topbar">
+   <div class="ptitle"><h1 id="ptitle">Perception Dashboard</h1><p id="psub">Trung tâm điều khiển AI auto-labeling LiDAR 3D</p></div>
+   <div class="chips">
+    <span class="chip"><span class="d"></span>GPU · NVIDIA L4</span>
+    <span class="chip"><span class="d"></span>Pipeline · TransFusion</span>
+    <a id="cvatlink" target="_blank" class="btn ghost">Mở CVAT ↗</a>
+   </div>
+  </div>
+
+  <!-- DASHBOARD -->
+  <section class="sec on" id="dash">
+   <div class="viewport">
+    <canvas id="hc"></canvas><div class="vp-scan"></div>
+    <div class="vp-br tl"></div><div class="vp-br tr"></div><div class="vp-br bl"></div><div class="vp-br br"></div>
+    <div class="vp-tag"><span class="rec"></span>LIVE PERCEPTION FEED</div>
+    <div class="vp-hud mono">FRAME <b id="hudframe">0000</b><br>OBJECTS <b>8</b> · 360° SCAN</div>
+    <div class="vp-legend">
+     <span><i style="background:#22d3ee"></i>Car</span><span><i style="background:#3b82f6"></i>Truck</span>
+     <span><i style="background:#a855f7"></i>Pedestrian</span><span><i style="background:#34d399"></i>Cyclist</span>
+    </div>
+   </div>
+   <div class="tiles">
+    <div class="tile accent"><div class="ic"><svg viewBox="0 0 24 24"><path d="M12 2l9 5v10l-9 5-9-5V7z"/></svg></div><div class="n" id="t_tasks">—</div><div class="l">Task đã tạo</div></div>
+    <div class="tile"><div class="ic"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/></svg></div><div class="n" id="t_jobs">—</div><div class="l">Job (phần việc)</div></div>
+    <div class="tile"><div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3"/><path d="M5 21c0-4 3-6 7-6s7 2 7 6"/></svg></div><div class="n" id="t_users">—</div><div class="l">Tài khoản CVAT</div></div>
+    <div class="tile"><div class="ic"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/></svg></div><div class="n" style="color:var(--green)">L4</div><div class="l">GPU · 24GB</div></div>
+   </div>
+   <div class="glass pad">
+    <div class="hdr"><span class="bar"></span><b>Quy trình</b></div>
+    <div class="pipe">
+     <div class="pstep"><span class="num">1</span>Upload dataset</div><span class="arr">→</span>
+     <div class="pstep"><span class="num">2</span>Auto-label GPU</div><span class="arr">→</span>
+     <div class="pstep"><span class="num">3</span>Phân công</div><span class="arr">→</span>
+     <div class="pstep"><span class="num">4</span>Annotate / Review</div><span class="arr">→</span>
+     <div class="pstep"><span class="num">5</span>Đánh giá</div>
+    </div>
+   </div>
+  </section>
+
+  <!-- AUTO-LABEL -->
+  <section class="sec" id="auto">
+   <div class="grid2">
+    <div class="glass pad">
+     <div class="hdr"><span class="bar"></span><b>Dataset & cấu hình</b></div>
+     <p class="sub">Upload point cloud → tool tự sinh 3D cuboid trên GPU → đẩy vào CVAT.</p>
+     <form id="f">
+      <label>Tên task</label><input name="task_name" value="Auto Label 3D" required>
+      <label>Dataset (.zip chứa pointcloud/*.pcd)</label>
+      <div class="drop" id="drop"><div class="big">📦</div><div class="t">Kéo thả hoặc bấm chọn file .zip</div>
+       <div class="s">pointcloud/*.pcd (+ context_images/ nếu có)</div>
+       <input type="file" name="file" id="fileinp" accept=".zip" required><div class="fname" id="fname"></div></div>
+      <details><summary>Tùy chọn CVAT (mặc định: server này)</summary>
+       <label>CVAT URL</label><input name="cvat_url">
+       <div class="row2"><div><label>User</label><input name="cvat_user" value="admin"></div>
+       <div><label>Password</label><input name="cvat_pass" type="password" value="Cvat123456"></div></div>
+      </details>
+      <div style="margin-top:20px"><button class="btn" id="btn" style="width:100%">▶ Bắt đầu auto-label</button></div>
+     </form>
+    </div>
+    <div>
+     <div class="viewport" style="height:220px;margin-bottom:16px"><canvas id="hc2"></canvas><div class="vp-scan"></div>
+      <div class="vp-br tl"></div><div class="vp-br tr"></div><div class="vp-br bl"></div><div class="vp-br br"></div>
+      <div class="vp-tag"><span class="rec"></span>3D WORKSPACE</div></div>
+     <div class="glass pad hidden" id="prog">
+      <div class="hdr" style="margin-bottom:12px"><span class="bar"></span><b>Tiến trình</b> <span id="badge" class="badge b-run" style="margin-left:6px">Đang chạy…</span></div>
+      <div class="pstat" id="pstat"></div>
+      <div class="bar" id="pbarwrap"><i id="pbar"></i></div>
+      <a id="rlink" class="result hidden" target="_blank">Mở task trong CVAT →</a>
+      <label>Nhật ký</label><div id="log"></div>
+     </div>
+    </div>
+   </div>
+  </section>
+
+  <!-- PHAN CONG -->
+  <section class="sec" id="assign">
+   <div class="grid2">
+    <div class="glass pad">
+     <div class="hdr"><span class="bar"></span><b>① Tạo tài khoản annotator</b></div>
+     <p class="sub">Tạo sẵn tài khoản CVAT để annotator đăng nhập làm việc.</p>
+     <label>Username (mỗi dòng 1, hoặc cách dấu phẩy)</label>
+     <textarea id="ac_users" rows="4">annotator1
+annotator2</textarea>
+     <label>Mật khẩu mặc định (chung)</label><input id="ac_pass" value="Annotator123">
+     <div style="margin-top:16px"><button class="btn" id="ac_btn">+ Tạo tài khoản</button></div>
+     <pre class="out" id="ac_result"></pre>
+    </div>
+    <div class="glass pad">
+     <div class="hdr"><span class="bar"></span><b>② Chia việc cho annotator</b></div>
+     <p class="sub">Task ID + danh sách annotator → mỗi job gán 1 người luân phiên.</p>
+     <label>Task ID</label><input id="as_task" placeholder="vd: 15">
+     <label>Annotator (mỗi dòng 1 username đã tạo)</label>
+     <textarea id="as_users" rows="4">annotator1
+annotator2</textarea>
+     <div style="margin-top:16px"><button class="btn" id="as_btn">⇄ Phân công</button></div>
+     <pre class="out" id="as_result"></pre>
+    </div>
+   </div>
+  </section>
+
+  <!-- NHOM -->
+  <section class="sec" id="team">
+   <div class="glass pad">
+    <div class="hdr" style="justify-content:space-between"><div style="display:flex;gap:10px;align-items:center"><span class="bar"></span><b>Trạng thái nhóm</b></div>
+     <button class="btn ghost" id="team_refresh" style="padding:8px 15px">↻ Làm mới</button></div>
+    <table style="margin-top:14px"><thead><tr><th>Annotator</th><th>Được giao</th><th>Đang làm</th><th>Xong</th><th>Tiến độ</th><th>Hoạt động cuối</th></tr></thead>
+    <tbody id="team_body"><tr><td colspan="6" class="muted" style="color:var(--dim)">Bấm "Làm mới" để tải…</td></tr></tbody></table>
+   </div>
+  </section>
+
+  <!-- DANH GIA -->
+  <section class="sec" id="eval">
+   <div class="grid2">
+    <div class="glass pad">
+     <div class="hdr"><span class="bar"></span><b>Đánh giá chất lượng TOOL</b></div>
+     <p class="sub">Tool chạy inference trên data → so với ground truth → chấm % Giữ/Sửa/Xóa/Bổ sung, 3D IoU, heading.</p>
+     <label>① Data point cloud (chọn có sẵn trên server — nhanh, hoặc upload mới)</label>
+     <select id="ev_dataset"></select>
+     <div id="ev_dataup" style="margin-top:8px;display:none"><input type="file" id="ev_data" accept=".zip"></div>
+     <label>② Ground truth — Datumaro 3D (.json/.zip export từ CVAT) hoặc JSON tool</label>
+     <input type="file" id="ev_gt" accept=".json,.zip">
+     <div style="margin-top:18px"><button class="btn" id="ev_btn">◎ Chạy đánh giá</button></div>
+     <div class="glass pad hidden" id="ev_prog" style="margin-top:16px;background:rgba(6,11,22,.5)">
+      <div>Trạng thái: <span id="ev_badge" class="badge b-run">Đang chạy…</span></div>
+      <div class="pstat" id="ev_pstat"></div><div class="bar" id="ev_pbarwrap"><i id="ev_pbar"></i></div>
+      <details style="margin-top:10px"><summary>Nhật ký</summary><div id="ev_log" style="margin-top:8px"></div></details>
+     </div>
+    </div>
+    <div id="ev_result"></div>
+   </div>
+  </section>
+ </main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const CVAT = location.protocol+'//'+location.hostname+':8080';
+document.getElementById('cvatlink').href = CVAT;
+
+/* ---------- nav ---------- */
+const TITLES={dash:['Perception Dashboard','Trung tâm điều khiển AI auto-labeling LiDAR 3D'],
+ auto:['Auto-label','Sinh nhãn 3D cuboid tự động bằng GPU'],
+ assign:['Phân công','Tạo tài khoản & chia việc cho annotator'],
+ team:['Nhóm','Theo dõi tiến độ từng annotator'],
+ eval:['Đánh giá','Benchmark chất lượng tool so với ground truth']};
+document.querySelectorAll('.nav').forEach(n=>n.onclick=()=>{
+ document.querySelectorAll('.nav').forEach(x=>x.classList.remove('on'));n.classList.add('on');
+ const s=n.dataset.s;document.querySelectorAll('.sec').forEach(x=>x.classList.toggle('on',x.id===s));
+ document.getElementById('ptitle').textContent=TITLES[s][0];document.getElementById('psub').textContent=TITLES[s][1];
+ if(s==='team')loadTeam();
+});
+
+/* ---------- helpers ---------- */
+function uploadXHR(url,fd,onprog){return new Promise((res,rej)=>{
+ const x=new XMLHttpRequest();x.open('POST',url);
+ x.upload.onprogress=e=>{if(e.lengthComputable)onprog(Math.round(e.loaded/e.total*100));};
+ x.onload=()=>{try{res(JSON.parse(x.responseText));}catch(err){rej(err);}};
+ x.onerror=()=>rej(new Error('net'));x.send(fd);});}
+function setBar(pre,pct,text,proc){
+ const s=document.getElementById(pre+'stat'),w=document.getElementById(pre+'barwrap'),b=document.getElementById(pre+'bar');
+ if(s)s.textContent=text||'';
+ if(proc){w.classList.add('proc');}else{w.classList.remove('proc');b.style.width=(pct||0)+'%';}}
+function lastLog(log){const ls=(log||'').split('\n').filter(l=>l.trim()&&!/Warning|custom_|backward|meshgrid|_VF|FutureWarning|Loading param/.test(l));return ls.length?ls[ls.length-1].trim():'';}
+function fixU(u){try{return u.replace('localhost',location.hostname)}catch(e){return u}}
+
+/* ---------- stats ---------- */
+fetch('/api/stats').then(r=>r.json()).then(d=>{if(d.ok){t_tasks.textContent=d.tasks;t_jobs.textContent=d.jobs;t_users.textContent=d.users;}}).catch(()=>{});
+
+/* ---------- auto-label ---------- */
+const f=document.getElementById('f'),btn=document.getElementById('btn');
+const drop=document.getElementById('drop'),fileinp=document.getElementById('fileinp'),fname=document.getElementById('fname');
+drop.onclick=()=>fileinp.click();
+fileinp.onchange=()=>{fname.textContent=fileinp.files[0]?('✓ '+fileinp.files[0].name):'';};
+['dragover','dragenter'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('hl');}));
+['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('hl');}));
+drop.addEventListener('drop',e=>{if(e.dataTransfer.files[0]){fileinp.files=e.dataTransfer.files;fname.textContent='✓ '+e.dataTransfer.files[0].name;}});
+f.onsubmit=e=>{e.preventDefault();btn.disabled=true;btn.textContent='Đang chạy…';
+ document.getElementById('prog').classList.remove('hidden');document.getElementById('rlink').classList.add('hidden');
+ setBar('p',0,'Chuẩn bị tải lên…',false);
+ uploadXHR('/jobs',new FormData(f),p=>setBar('p',p,'📤 Đang tải lên… '+p+'%',false))
+  .then(d=>{if(d.error){alert(d.error);btn.disabled=false;btn.textContent='▶ Bắt đầu auto-label';return;}
+    setBar('p',100,'⚙️ Đang xử lý trên GPU…',true);poll(d.job_id);})
+  .catch(()=>{alert('Lỗi mạng khi tải lên');btn.disabled=false;btn.textContent='▶ Bắt đầu auto-label';});};
+async function poll(id){const j=await(await fetch('/jobs/'+id)).json();
+ log.textContent=j.log||'(đang khởi động…)';log.scrollTop=log.scrollHeight;
+ if(j.task_url){rlink.href=fixU(j.task_url);rlink.classList.remove('hidden');}
+ if(j.status==='running'){setBar('p',100,'⚙️ '+(lastLog(j.log)||'Đang xử lý trên GPU…'),true);setTimeout(()=>poll(id),2000);return;}
+ btn.disabled=false;btn.textContent='▶ Bắt đầu auto-label';
+ if(j.status==='done'){badge.className='badge b-ok';badge.textContent='Hoàn tất ✓';setBar('p',100,'✓ Xong',false);}
+ else{badge.className='badge b-err';badge.textContent='Lỗi ✕';setBar('p',100,'✕ Lỗi — xem nhật ký',false);}}
+
+/* ---------- accounts & assign ---------- */
+document.getElementById('ac_btn').onclick=async()=>{
+ const b=document.getElementById('ac_btn'),out=document.getElementById('ac_result');
+ const fd=new FormData();fd.append('usernames',document.getElementById('ac_users').value);fd.append('password',document.getElementById('ac_pass').value);
+ b.disabled=true;b.textContent='Đang tạo…';out.textContent='';
+ const j=await(await fetch('/api/accounts',{method:'POST',body:fd})).json();
+ b.disabled=false;b.textContent='+ Tạo tài khoản';
+ out.textContent=j.error?('✕ '+j.error):('✓ Xong:\n'+(j.result||''));};
+document.getElementById('as_btn').onclick=async()=>{
+ const b=document.getElementById('as_btn'),out=document.getElementById('as_result');
+ const fd=new FormData();fd.append('task_id',document.getElementById('as_task').value);fd.append('usernames',document.getElementById('as_users').value);
+ b.disabled=true;b.textContent='Đang phân công…';out.textContent='';
+ const j=await(await fetch('/api/assign',{method:'POST',body:fd})).json();
+ b.disabled=false;b.textContent='⇄ Phân công';
+ if(j.error||!j.ok){out.textContent='✕ '+(j.error||'');return;}
+ out.textContent='✓ Đã giao '+j.assigns.length+' job:\n'+j.assigns.map(a=>'  job '+a.job+' → '+a.user).join('\n');};
+
+/* ---------- team ---------- */
+async function loadTeam(){const b=document.getElementById('team_body');b.innerHTML='<tr><td colspan=6 style="color:var(--dim)">Đang tải…</td></tr>';
+ const d=await(await fetch('/api/team')).json();
+ if(!d.ok){b.innerHTML='<tr><td colspan=6 style="color:var(--dim)">Chưa tải được: '+(d.error||'')+'</td></tr>';return;}
+ if(!d.rows.length){b.innerHTML='<tr><td colspan=6 style="color:var(--dim)">Chưa có job.</td></tr>';return;}
+ b.innerHTML=d.rows.map(r=>{const p=r.assigned?Math.round(r.completed/r.assigned*100):0;
+  const ini=(r.user||'?').replace('— chưa giao —','∅').slice(0,2).toUpperCase();
+  return `<tr><td><span class=ava>${ini}</span>${r.user}</td><td class=mono>${r.assigned}</td><td class=mono>${r.in_progress}</td><td class=mono>${r.completed}</td>
+  <td><span class=minibar><i style=width:${p}%></i></span> <span class="mono" style="font-size:.74rem;color:var(--muted)">${p}%</span></td>
+  <td style="color:var(--muted);font-size:.8rem">${(r.last||'').slice(0,16).replace('T',' ')}</td></tr>`;}).join('');}
+document.getElementById('team_refresh').onclick=loadTeam;
+
+/* ---------- eval ---------- */
+const evBtn=document.getElementById('ev_btn'),evSel=document.getElementById('ev_dataset');
+function updDataup(){document.getElementById('ev_dataup').style.display=evSel.value?'none':'block';}
+fetch('/api/datasets').then(r=>r.json()).then(d=>{const ds=d.datasets||[];
+ evSel.innerHTML=ds.map(x=>`<option value="${x.id}">${x.label}</option>`).join('')+'<option value="">— Upload data mới —</option>';updDataup();}).catch(()=>{});
+evSel.onchange=updDataup;
+evBtn.onclick=()=>{
+ const g=document.getElementById('ev_gt').files[0];
+ if(!g){alert('Chọn file Ground truth');return;}
+ const fd=new FormData();fd.append('gt',g);
+ if(evSel.value){fd.append('dataset',evSel.value);}
+ else{const d=document.getElementById('ev_data').files[0];if(!d){alert('Chọn data có sẵn hoặc upload data');return;}fd.append('data',d);}
+ evBtn.disabled=true;evBtn.textContent='Đang chạy…';
+ document.getElementById('ev_prog').classList.remove('hidden');document.getElementById('ev_result').innerHTML='';
+ setBar('ev_p',0,'Chuẩn bị tải lên…',false);
+ uploadXHR('/api/evaluate',fd,p=>setBar('ev_p',p,'📤 Đang tải GT lên… '+p+'%',false))
+  .then(j=>{if(j.error){alert(j.error);evBtn.disabled=false;evBtn.textContent='◎ Chạy đánh giá';return;}
+    setBar('ev_p',100,'⚙️ Đang chấm điểm (inference + so sánh)…',true);pollEval(j.job_id);})
+  .catch(()=>{alert('Lỗi mạng');evBtn.disabled=false;evBtn.textContent='◎ Chạy đánh giá';});};
+async function pollEval(id){const j=await(await fetch('/api/evaluate/'+id)).json();
+ document.getElementById('ev_log').textContent=j.log||'(đang khởi động…)';
+ if(j.status==='running'){setBar('ev_p',100,'⚙️ '+(lastLog(j.log)||'Đang chấm điểm…'),true);setTimeout(()=>pollEval(id),2000);return;}
+ const b=document.getElementById('ev_badge');evBtn.disabled=false;evBtn.textContent='◎ Chạy đánh giá';
+ if(j.status==='done'&&j.eval){b.className='badge b-ok';b.textContent='Hoàn tất ✓';setBar('ev_p',100,'✓ Xong',false);renderEval(j.eval);}
+ else{b.className='badge b-err';b.textContent='Lỗi ✕';setBar('ev_p',100,'✕ Lỗi — xem nhật ký',false);}}
+function evbar(label,val,total,color){const p=total?Math.round(val/total*100):0;
+ return `<div style="margin:9px 0"><div style="display:flex;justify-content:space-between;font-size:.82rem"><span>${label}</span><span style="color:var(--muted)" class=mono>${val} (${p}%)</span></div><div class=bar><i style="width:${p}%;background:${color}"></i></div></div>`;}
+function renderEval(m){
+ const tot=(m.accept+m.edit+m.reject+m.miss)||1, acc=m.total_gt?Math.round((m.accept+m.edit)/m.total_gt*100):0;
+ let h=`<div class="tiles" style="grid-template-columns:repeat(2,1fr);margin-bottom:16px">
+  <div class="tile accent"><div class=n class=mono>${(m.mean_iou*100).toFixed(0)}%</div><div class=l>IoU trung bình</div></div>
+  <div class="tile"><div class=n class=mono style="color:var(--green)">${acc}%</div><div class=l>Bắt đúng GT</div></div>
+  <div class="tile"><div class=n class=mono>${m.total_pred}</div><div class=l>Box tool gán</div></div>
+  <div class="tile"><div class=n class=mono>${(m.mean_heading_error_deg||0).toFixed(1)}°</div><div class=l>Lỗi hướng TB</div></div>
+ </div>
+ <div class="glass pad"><div class=hdr><span class=bar></span><b>Chất lượng pre-label (vs GT)</b></div>
+  ${evbar('✅ Giữ nguyên (đúng, IoU≥0.7)',m.accept,tot,'var(--green)')}
+  ${evbar('✏️ Phải sửa (0.25≤IoU<0.7)',m.edit,tot,'var(--amber)')}
+  ${evbar('❌ Thừa/sai (xóa)',m.reject,tot,'var(--red)')}
+  ${evbar('➕ Bỏ sót (bổ sung)',m.miss,tot,'var(--blue)')}
+ </div>`;
+ const cls=Object.entries(m.per_class||{}).filter(([k,v])=>v.total_gt||v.total_pred);
+ if(cls.length){h+=`<div class="glass pad" style="margin-top:16px"><div class=hdr><span class=bar></span><b>Theo class</b></div>
+  <table style="margin-top:8px"><thead><tr><th>Class</th><th>GT</th><th>Giữ</th><th>Sửa</th><th>Sót</th><th>IoU</th></tr></thead><tbody>`;
+  for(const [k,v] of cls)h+=`<tr><td>${k}</td><td class=mono>${v.total_gt}</td><td class=mono>${v.accept}</td><td class=mono>${v.edit}</td><td class=mono>${v.miss}</td><td class=mono>${(v.mean_iou*100).toFixed(0)}%</td></tr>`;
+  h+='</tbody></table></div>';}
+ document.getElementById('ev_result').innerHTML=h;}
+
+/* ---------- 3D LiDAR scene ---------- */
+function lidarScene(canvas){
+ if(!window.THREE||!canvas)return;
+ const rn=new THREE.WebGLRenderer({canvas,antialias:true,alpha:true});
+ rn.setPixelRatio(Math.min(devicePixelRatio,2));
+ const W=()=>canvas.clientWidth||600,H=()=>canvas.clientHeight||400;
+ rn.setSize(W(),H(),false);
+ const sc=new THREE.Scene();sc.fog=new THREE.FogExp2(0x05080f,0.016);
+ const cam=new THREE.PerspectiveCamera(56,W()/H(),.1,400);cam.position.set(0,17,33);
+ sc.add(new THREE.GridHelper(90,45,0x18324e,0x0f2036));
+ const objs=[[-16,-12,'car'],[12,8,'truck'],[-8,16,'ped'],[18,-15,'car'],[0,-24,'cyclist'],[-21,4,'car'],[9,22,'ped'],[-4,-5,'car']];
+ const N=5500,pos=new Float32Array(N*3),col=new Float32Array(N*3);
+ for(let i=0;i<N;i++){let x,z,y;const r=Math.random();
+  if(r<0.72){const a=Math.random()*6.283,d=Math.sqrt(Math.random())*42;x=Math.cos(a)*d;z=Math.sin(a)*d;y=Math.random()*.5;}
+  else{const c=objs[Math.floor(Math.random()*objs.length)];x=c[0]+(Math.random()-.5)*4;z=c[1]+(Math.random()-.5)*4;y=Math.random()*(c[2]==='truck'?3.4:c[2]==='ped'?1.8:2);}
+  pos[i*3]=x;pos[i*3+1]=y;pos[i*3+2]=z;const t=Math.min(1,y/3.4);
+  col[i*3]=.12+t*.55;col[i*3+1]=.72+t*.28;col[i*3+2]=.96;}
+ const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(pos,3));g.setAttribute('color',new THREE.BufferAttribute(col,3));
+ sc.add(new THREE.Points(g,new THREE.PointsMaterial({size:.135,vertexColors:true,transparent:true,opacity:.92})));
+ const COL={car:0x22d3ee,truck:0x3b82f6,ped:0xa855f7,cyclist:0x34d399},SZ={car:[4.2,2,1.8],truck:[6.4,2.6,3],ped:[.9,.9,1.8],cyclist:[1.8,.8,1.7]};
+ objs.forEach(c=>{const s=SZ[c[2]];const e=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(s[0],s[2],s[1])),new THREE.LineBasicMaterial({color:COL[c[2]]}));e.position.set(c[0],s[2]/2,c[1]);sc.add(e);});
+ const sweepGeo=new THREE.PlaneGeometry(42,.09);sweepGeo.translate(21,0,0);sweepGeo.rotateX(-Math.PI/2);
+ const sweep=new THREE.Mesh(sweepGeo,new THREE.MeshBasicMaterial({color:0x22d3ee,transparent:true,opacity:.55}));sweep.position.y=.12;sc.add(sweep);
+ let a=.2;function loop(){a+=.0015;cam.position.x=Math.sin(a)*34;cam.position.z=Math.cos(a)*34;cam.lookAt(0,2,0);
+  sweep.rotation.z-=.016;rn.render(sc,cam);requestAnimationFrame(loop);}loop();
+ addEventListener('resize',()=>{rn.setSize(W(),H(),false);cam.aspect=W()/H();cam.updateProjectionMatrix();});
+}
+lidarScene(document.getElementById('hc'));
+lidarScene(document.getElementById('hc2'));
+let hf=0;setInterval(()=>{hf=(hf+1)%10000;const el=document.getElementById('hudframe');if(el)el.textContent=String(hf).padStart(4,'0');},120);
+</script>
+</body>
+</html>
