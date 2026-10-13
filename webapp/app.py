@@ -318,6 +318,77 @@ def api_evaluate_status(request: Request, job_id: str):
     return {"status": job["status"], "log": job["log"][-4000:], "eval": job.get("eval")}
 
 
+# ------------------------------------------------- accounts & assignment ------
+CVAT_DIR = os.path.join(HOME, "cvat")
+_SAFE_USER = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def create_cvat_users(names, password):
+    """Tạo tài khoản annotator trong CVAT qua Django shell (active ngay)."""
+    script = (
+        "from django.contrib.auth import get_user_model\n"
+        "U=get_user_model()\n"
+        f"for n in {json.dumps(names)}:\n"
+        "    u,c=U.objects.get_or_create(username=n, defaults={'email':n+'@local'})\n"
+        f"    u.set_password({json.dumps(password)}); u.is_active=True; u.save()\n"
+        "    print(n, 'created' if c else 'exists')\n"
+    )
+    cmd = ["sudo", "docker", "compose", "exec", "-T", "cvat_server",
+           "python3", "/home/django/manage.py", "shell", "-c", script]
+    r = subprocess.run(cmd, cwd=CVAT_DIR, capture_output=True, text=True, timeout=150)
+    return (r.stdout + r.stderr).strip()
+
+
+@app.post("/api/accounts")
+def api_accounts(request: Request, usernames: str = Form(...),
+                 password: str = Form("Annotator123")):
+    if not authed(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    names = [x.strip() for x in usernames.replace(",", "\n").splitlines() if x.strip()]
+    bad = [n for n in names if not _SAFE_USER.match(n)]
+    if bad:
+        return JSONResponse({"error": f"Username không hợp lệ (chỉ A-Z,0-9,_,.,-): {bad}"}, status_code=400)
+    if not names:
+        return JSONResponse({"error": "Chưa nhập tài khoản"}, status_code=400)
+    try:
+        out = create_cvat_users(names, password)
+        return {"ok": True, "result": out}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/assign")
+def api_assign(request: Request, task_id: int = Form(...), usernames: str = Form(...)):
+    if not authed(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    names = [x.strip() for x in usernames.replace(",", "\n").splitlines() if x.strip()]
+    if not names:
+        return JSONResponse({"error": "Chưa nhập annotator"}, status_code=400)
+    try:
+        tok = cvat_token()
+        uids = []
+        for n in names:
+            res = cvat_get("/api/users", tok, search=n).get("results", [])
+            m = [u for u in res if u["username"] == n]
+            if m:
+                uids.append((n, m[0]["id"]))
+        if not uids:
+            return {"ok": False, "error": "Không thấy tài khoản nào (tạo ở mục ① trước)"}
+        jobs = cvat_get("/api/jobs", tok, task_id=task_id).get("results", [])
+        if not jobs:
+            return {"ok": False, "error": f"Task {task_id} không có job"}
+        assigns = []
+        for i, j in enumerate(jobs):
+            n, uid = uids[i % len(uids)]
+            requests.patch(f"{CVAT_URL}/api/jobs/{j['id']}",
+                           headers={"Authorization": f"Token {tok}"},
+                           json={"assignee": uid}, timeout=10)
+            assigns.append({"job": j["id"], "user": n})
+        return {"ok": True, "assigns": assigns, "task_url": f"{CVAT_URL}/tasks/{task_id}"}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # -------------------------------------------------------------------- HTML -----
 _STYLE = """
 :root{--bg:#070b16;--bg2:#0d1424;--panel:#111a2e;--panel2:#16213a;--line:#233249;
@@ -453,14 +524,25 @@ details summary{cursor:pointer;color:var(--cyan);font-size:.85rem;margin-top:8px
   </section>
 
   <section class=sec id=assign>
-   <div class=card style=max-width:640px>
-    <b>Chia việc cho annotator</b>
-    <p class=muted style=font-size:.86rem>Nhập ID task + danh sách tài khoản → mỗi job gán cho 1 người (luân phiên).</p>
-    <label>Task ID</label><input id=as_task placeholder="vd: 9">
-    <label>Danh sách tài khoản (mỗi dòng 1 username CVAT)</label>
-    <textarea id=as_users rows=5 style="width:100%;border-radius:10px;border:1px solid var(--line);background:#0b1223;color:var(--ink);padding:11px" placeholder="annotator1&#10;annotator2"></textarea>
-    <div style=margin-top:16px><button class="btn" id=as_btn>Phân công</button></div>
-    <p class=soon id=as_note style=margin-top:12px>⏳ Backend phân công sẽ bật khi VM chạy (gọi CVAT job assignment API).</p>
+   <div class=card style=max-width:680px>
+    <b>① Tạo tài khoản annotator</b>
+    <p class=muted style=font-size:.84rem>Tạo sẵn tài khoản trong CVAT để annotator đăng nhập (http://IP:8080) làm việc được giao.</p>
+    <label>Username (mỗi dòng 1, hoặc cách dấu phẩy)</label>
+    <textarea id=ac_users rows=4 style="width:100%;border-radius:10px;border:1px solid var(--line);background:#0b1223;color:var(--ink);padding:11px">annotator1
+annotator2</textarea>
+    <label>Mật khẩu mặc định (chung)</label><input id=ac_pass value="Annotator123">
+    <div style=margin-top:12px><button class=btn id=ac_btn>Tạo tài khoản</button></div>
+    <pre id=ac_result class=mono style="margin-top:10px;color:#aebdd8;font-size:.78rem;white-space:pre-wrap"></pre>
+   </div>
+   <div class=card style=max-width:680px;margin-top:14px>
+    <b>② Chia việc cho annotator</b>
+    <p class=muted style=font-size:.84rem>Nhập Task ID (task đã auto-label) + danh sách annotator → mỗi job gán 1 người luân phiên.</p>
+    <label>Task ID</label><input id=as_task placeholder="vd: 15">
+    <label>Annotator (mỗi dòng 1 username đã tạo)</label>
+    <textarea id=as_users rows=4 style="width:100%;border-radius:10px;border:1px solid var(--line);background:#0b1223;color:var(--ink);padding:11px">annotator1
+annotator2</textarea>
+    <div style=margin-top:12px><button class=btn id=as_btn>Phân công</button></div>
+    <pre id=as_result class=mono style="margin-top:10px;color:#aebdd8;font-size:.78rem;white-space:pre-wrap"></pre>
    </div>
   </section>
 
@@ -530,7 +612,25 @@ async function loadTeam(){const b=document.getElementById('team_body');b.innerHT
     <td><div class=bar><i style=width:${p}%></i></div><span class=muted style=font-size:.75rem>${p}%</span></td>
     <td class=muted>${(r.last||'').slice(0,16).replace('T',' ')}</td></tr>`}).join('');}
 document.getElementById('team_refresh').onclick=loadTeam;
-document.getElementById('as_btn').onclick=()=>alert('Backend phân công sẽ bật ở bước sau (khi VM chạy).');
+// tao tai khoan annotator
+document.getElementById('ac_btn').onclick=async()=>{
+  const b=document.getElementById('ac_btn'), out=document.getElementById('ac_result');
+  const fd=new FormData();fd.append('usernames',document.getElementById('ac_users').value);fd.append('password',document.getElementById('ac_pass').value);
+  b.disabled=true;b.textContent='Đang tạo…';out.textContent='';
+  const j=await(await fetch('/api/accounts',{method:'POST',body:fd})).json();
+  b.disabled=false;b.textContent='Tạo tài khoản';
+  out.textContent=j.error?('✕ Lỗi: '+j.error):('✓ Xong:\\n'+(j.result||''));
+};
+// phan cong job
+document.getElementById('as_btn').onclick=async()=>{
+  const b=document.getElementById('as_btn'), out=document.getElementById('as_result');
+  const fd=new FormData();fd.append('task_id',document.getElementById('as_task').value);fd.append('usernames',document.getElementById('as_users').value);
+  b.disabled=true;b.textContent='Đang phân công…';out.textContent='';
+  const j=await(await fetch('/api/assign',{method:'POST',body:fd})).json();
+  b.disabled=false;b.textContent='Phân công';
+  if(j.error||!j.ok){out.textContent='✕ Lỗi: '+(j.error||'');return;}
+  out.textContent='✓ Đã giao '+j.assigns.length+' job:\\n'+j.assigns.map(a=>'  job '+a.job+' → '+a.user).join('\\n');
+};
 // ===== Đánh giá =====
 const evBtn=document.getElementById('ev_btn');
 evBtn.onclick=async()=>{
