@@ -275,24 +275,57 @@ def api_team(request: Request):
         return {"ok": False, "error": str(e)}
 
 
+def list_datasets():
+    out = []
+    base = os.path.join(HOME, "data_day14")
+    if os.path.isdir(os.path.join(base, "pointcloud")):
+        out.append({"id": "data_day14", "label": "data_day14 (mẫu)", "dir": base})
+    try:
+        for d in sorted(os.listdir(JOBS_DIR), reverse=True):
+            jd = os.path.join(JOBS_DIR, d, "data")
+            dd = find_data_dir(jd) if os.path.isdir(jd) else None
+            if dd:
+                n = len([f for f in os.listdir(os.path.join(dd, "pointcloud")) if f.endswith(".pcd")])
+                out.append({"id": d, "label": f"{d} ({n} frames)", "dir": dd})
+    except OSError:
+        pass
+    return out[:20]
+
+
+@app.get("/api/datasets")
+def api_datasets(request: Request):
+    if not authed(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return {"datasets": [{"id": x["id"], "label": x["label"]} for x in list_datasets()]}
+
+
 @app.post("/api/evaluate")
-def api_evaluate(request: Request, data: UploadFile = File(...), gt: UploadFile = File(...)):
+def api_evaluate(request: Request, gt: UploadFile = File(...),
+                 data: UploadFile = File(None), dataset: str = Form(None)):
     if not authed(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     job_id = "ev" + uuid.uuid4().hex[:6]
     jdir = os.path.join(JOBS_DIR, job_id)
     os.makedirs(jdir, exist_ok=True)
-    dz = os.path.join(jdir, "data.zip")
-    with open(dz, "wb") as f:
-        shutil.copyfileobj(data.file, f)
-    try:
-        with zipfile.ZipFile(dz) as z:
-            z.extractall(os.path.join(jdir, "data"))
-    except zipfile.BadZipFile:
-        return JSONResponse({"error": "Data không phải .zip hợp lệ"}, status_code=400)
-    data_dir = find_data_dir(os.path.join(jdir, "data"))
-    if not data_dir:
-        return JSONResponse({"error": "Không thấy pointcloud/ trong data.zip"}, status_code=400)
+    if dataset:  # dùng data có sẵn trên server (không phải upload lại)
+        ds = {x["id"]: x["dir"] for x in list_datasets()}
+        data_dir = ds.get(dataset)
+        if not data_dir:
+            return JSONResponse({"error": "Dataset không hợp lệ"}, status_code=400)
+    elif data is not None and data.filename:
+        dz = os.path.join(jdir, "data.zip")
+        with open(dz, "wb") as f:
+            shutil.copyfileobj(data.file, f)
+        try:
+            with zipfile.ZipFile(dz) as z:
+                z.extractall(os.path.join(jdir, "data"))
+        except zipfile.BadZipFile:
+            return JSONResponse({"error": "Data không phải .zip hợp lệ"}, status_code=400)
+        data_dir = find_data_dir(os.path.join(jdir, "data"))
+        if not data_dir:
+            return JSONResponse({"error": "Không thấy pointcloud/ trong data.zip"}, status_code=400)
+    else:
+        return JSONResponse({"error": "Chọn dataset có sẵn hoặc upload data"}, status_code=400)
     gt_raw = os.path.join(jdir, "gt_raw")
     with open(gt_raw, "wb") as f:
         shutil.copyfileobj(gt.file, f)
@@ -559,8 +592,9 @@ annotator2</textarea>
    <div class=card style=max-width:680px>
     <b>Đánh giá chất lượng TOOL</b> <span class=muted>(so tool vs ground truth)</span>
     <p class=muted style=font-size:.86rem>Đẩy <b>2 luồng</b>: data để tool tự gán + ground truth (đáp án). Tool chạy inference rồi chấm: % Giữ/Sửa/Xóa/Bổ sung, 3D IoU, heading, theo class.</p>
-    <label>1️⃣ Data point cloud (.zip chứa <b>pointcloud/*.pcd</b>)</label>
-    <input type=file id=ev_data accept=.zip>
+    <label>1️⃣ Data point cloud — chọn data <b>có sẵn trên server</b> (nhanh) hoặc upload mới</label>
+    <select id=ev_dataset></select>
+    <div id=ev_dataup style="margin-top:8px;display:none"><input type=file id=ev_data accept=.zip></div>
     <label>2️⃣ Ground truth — <b>Datumaro 3D</b> (.json hoặc .zip export từ CVAT), hoặc JSON của tool</label>
     <input type=file id=ev_gt accept=".json,.zip">
     <div style=margin-top:16px><button class=btn id=ev_btn>Chạy đánh giá</button></div>
@@ -632,12 +666,21 @@ document.getElementById('as_btn').onclick=async()=>{
   out.textContent='✓ Đã giao '+j.assigns.length+' job:\\n'+j.assigns.map(a=>'  job '+a.job+' → '+a.user).join('\\n');
 };
 // ===== Đánh giá =====
-const evBtn=document.getElementById('ev_btn');
+const evBtn=document.getElementById('ev_btn'), evSel=document.getElementById('ev_dataset');
+function updDataup(){document.getElementById('ev_dataup').style.display=evSel.value?'none':'block';}
+fetch('/api/datasets').then(r=>r.json()).then(d=>{
+  const ds=d.datasets||[];
+  evSel.innerHTML=ds.map(x=>`<option value="${x.id}">${x.label}</option>`).join('')+'<option value="">— Upload data mới —</option>';
+  updDataup();
+});
+evSel.onchange=updDataup;
 evBtn.onclick=async()=>{
-  const d=document.getElementById('ev_data').files[0], g=document.getElementById('ev_gt').files[0];
-  if(!d||!g){alert('Chọn cả Data và Ground truth');return;}
-  const fd=new FormData();fd.append('data',d);fd.append('gt',g);
-  evBtn.disabled=true;evBtn.textContent='Đang tải lên…';
+  const g=document.getElementById('ev_gt').files[0];
+  if(!g){alert('Chọn file Ground truth');return;}
+  const fd=new FormData();fd.append('gt',g);
+  if(evSel.value){fd.append('dataset',evSel.value);}
+  else{const d=document.getElementById('ev_data').files[0];if(!d){alert('Chọn data có sẵn hoặc upload data');return;}fd.append('data',d);}
+  evBtn.disabled=true;evBtn.textContent='Đang xử lý…';
   const r=await fetch('/api/evaluate',{method:'POST',body:fd});const j=await r.json();
   if(j.error){alert(j.error);evBtn.disabled=false;evBtn.textContent='Chạy đánh giá';return;}
   document.getElementById('ev_prog').classList.remove('hidden');pollEval(j.job_id);
