@@ -500,8 +500,11 @@ font-size:.76rem;white-space:pre-wrap;max-height:300px;overflow:auto;color:#aebd
 table{width:100%;border-collapse:collapse;font-size:.88rem}
 th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line)}
 th{color:var(--muted);font-weight:600}
-.bar{height:7px;background:#1b2740;border-radius:5px;overflow:hidden}
-.bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--indigo))}
+.bar{height:9px;background:#1b2740;border-radius:5px;overflow:hidden}
+.bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--indigo));transition:width .2s}
+@keyframes shim{0%{background-position:-220px 0}100%{background-position:220px 0}}
+.bar.proc>i{width:100%!important;background:linear-gradient(90deg,#1b2740,var(--cyan),#1b2740);background-size:220px 100%;animation:shim 1.1s infinite linear}
+.pstat{font-size:.84rem;color:var(--cyan);margin:10px 0 6px}
 .result{display:inline-block;margin-top:12px;padding:10px 16px;border-radius:10px;background:var(--ok);color:#05261c;font-weight:700}
 .hidden{display:none}.soon{color:var(--warn);font-size:.82rem}
 details summary{cursor:pointer;color:var(--cyan);font-size:.85rem;margin-top:8px}
@@ -551,6 +554,8 @@ details summary{cursor:pointer;color:var(--cyan);font-size:.85rem;margin-top:8px
    </div>
    <div class="card hidden" id=prog style=max-width:640px;margin-top:14px>
     <div>Trạng thái: <span id=badge class="badge b-run">Đang chạy…</span></div>
+    <div class=pstat id=pstat></div>
+    <div class=bar id=pbarwrap><i id=pbar style=width:0%></i></div>
     <a id=rlink class="result hidden" target=_blank>Mở task trong CVAT →</a>
     <label>Nhật ký</label><div id=log></div>
    </div>
@@ -601,6 +606,8 @@ annotator2</textarea>
    </div>
    <div class="card hidden" id=ev_prog style=max-width:680px;margin-top:14px>
     <div>Trạng thái: <span id=ev_badge class="badge b-run">Đang chạy…</span></div>
+    <div class=pstat id=ev_pstat></div>
+    <div class=bar id=ev_pbarwrap><i id=ev_pbar style=width:0%></i></div>
     <div id=ev_result style=margin-top:14px></div>
     <details style=margin-top:10px><summary>Nhật ký</summary>
       <div id=ev_log class=mono style="background:#060b16;border:1px solid var(--line);border-radius:9px;padding:10px;font-size:.74rem;white-space:pre-wrap;max-height:220px;overflow:auto;color:#aebdd8;margin-top:8px"></div>
@@ -623,19 +630,34 @@ document.querySelectorAll('.nav').forEach(n=>n.onclick=()=>{
 document.querySelector('input[name=cvat_url]').value=location.protocol+'//'+location.hostname+':8080';
 // stats
 fetch('/api/stats').then(r=>r.json()).then(d=>{if(d.ok){t_tasks.textContent=d.tasks;t_jobs.textContent=d.jobs;t_users.textContent=d.users;}});
-// upload
+// ===== helpers tien trinh =====
+function uploadXHR(url,fd,onprog){return new Promise((res,rej)=>{
+  const x=new XMLHttpRequest();x.open('POST',url);
+  x.upload.onprogress=e=>{if(e.lengthComputable)onprog(Math.round(e.loaded/e.total*100));};
+  x.onload=()=>{try{res(JSON.parse(x.responseText));}catch(err){rej(err);}};
+  x.onerror=()=>rej(new Error('net'));x.send(fd);});}
+function setBar(pre,pct,text,proc){
+  const s=document.getElementById(pre+'stat'),w=document.getElementById(pre+'barwrap'),b=document.getElementById(pre+'bar');
+  if(s)s.textContent=text||'';
+  if(proc){w.classList.add('proc');}else{w.classList.remove('proc');b.style.width=(pct||0)+'%';}}
+function lastLog(log){const ls=(log||'').split('\\n').filter(l=>l.trim()&&!/Warning|custom_|backward|meshgrid|_VF|FutureWarning|Loading param/.test(l));return ls.length?ls[ls.length-1].trim():'';}
+// ===== auto-label =====
 const f=document.getElementById('f'),btn=document.getElementById('btn');
-f.onsubmit=async e=>{e.preventDefault();btn.disabled=true;btn.textContent='Đang tải lên…';
-  const r=await fetch('/jobs',{method:'POST',body:new FormData(f)});const d=await r.json();
-  if(d.error){alert(d.error);btn.disabled=false;btn.textContent='Bắt đầu auto-label';return;}
-  document.getElementById('prog').classList.remove('hidden');poll(d.job_id);};
+f.onsubmit=e=>{e.preventDefault();btn.disabled=true;btn.textContent='Đang chạy…';
+  document.getElementById('prog').classList.remove('hidden');document.getElementById('rlink').classList.add('hidden');
+  setBar('p',0,'Chuẩn bị tải lên…',false);
+  uploadXHR('/jobs',new FormData(f),p=>setBar('p',p,'📤 Đang tải lên… '+p+'%',false))
+   .then(d=>{if(d.error){alert(d.error);btn.disabled=false;btn.textContent='Bắt đầu auto-label';return;}
+     setBar('p',100,'⚙️ Đang xử lý trên GPU…',true);poll(d.job_id);})
+   .catch(()=>{alert('Lỗi mạng khi tải lên');btn.disabled=false;btn.textContent='Bắt đầu auto-label';});};
 function fixU(u){try{return u.replace('localhost',location.hostname)}catch(e){return u}}
 async function poll(id){const j=await(await fetch('/jobs/'+id)).json();
   log.textContent=j.log||'(đang khởi động…)';log.scrollTop=log.scrollHeight;
   if(j.task_url){rlink.href=fixU(j.task_url);rlink.classList.remove('hidden');}
-  if(j.status==='running'){setTimeout(()=>poll(id),2000);return;}
-  if(j.status==='done'){badge.className='badge b-ok';badge.textContent='Hoàn tất ✓';btn.disabled=false;btn.textContent='Bắt đầu auto-label';}
-  else{badge.className='badge b-err';badge.textContent='Lỗi ✕';btn.disabled=false;btn.textContent='Bắt đầu auto-label';}}
+  if(j.status==='running'){setBar('p',100,'⚙️ '+(lastLog(j.log)||'Đang xử lý trên GPU…'),true);setTimeout(()=>poll(id),2000);return;}
+  btn.disabled=false;btn.textContent='Bắt đầu auto-label';
+  if(j.status==='done'){badge.className='badge b-ok';badge.textContent='Hoàn tất ✓';setBar('p',100,'✓ Xong',false);}
+  else{badge.className='badge b-err';badge.textContent='Lỗi ✕';setBar('p',100,'✕ Lỗi — xem nhật ký',false);}}
 // team
 async function loadTeam(){const b=document.getElementById('team_body');b.innerHTML='<tr><td colspan=6 class=muted>Đang tải…</td></tr>';
   const d=await(await fetch('/api/team')).json();
@@ -674,24 +696,27 @@ fetch('/api/datasets').then(r=>r.json()).then(d=>{
   updDataup();
 });
 evSel.onchange=updDataup;
-evBtn.onclick=async()=>{
+evBtn.onclick=()=>{
   const g=document.getElementById('ev_gt').files[0];
   if(!g){alert('Chọn file Ground truth');return;}
   const fd=new FormData();fd.append('gt',g);
   if(evSel.value){fd.append('dataset',evSel.value);}
   else{const d=document.getElementById('ev_data').files[0];if(!d){alert('Chọn data có sẵn hoặc upload data');return;}fd.append('data',d);}
-  evBtn.disabled=true;evBtn.textContent='Đang xử lý…';
-  const r=await fetch('/api/evaluate',{method:'POST',body:fd});const j=await r.json();
-  if(j.error){alert(j.error);evBtn.disabled=false;evBtn.textContent='Chạy đánh giá';return;}
-  document.getElementById('ev_prog').classList.remove('hidden');pollEval(j.job_id);
+  evBtn.disabled=true;evBtn.textContent='Đang chạy…';
+  document.getElementById('ev_prog').classList.remove('hidden');document.getElementById('ev_result').innerHTML='';
+  setBar('ev_p',0,'Chuẩn bị tải lên…',false);
+  uploadXHR('/api/evaluate',fd,p=>setBar('ev_p',p,'📤 Đang tải GT lên… '+p+'%',false))
+   .then(j=>{if(j.error){alert(j.error);evBtn.disabled=false;evBtn.textContent='Chạy đánh giá';return;}
+     setBar('ev_p',100,'⚙️ Đang chấm điểm (inference + so sánh)…',true);pollEval(j.job_id);})
+   .catch(()=>{alert('Lỗi mạng');evBtn.disabled=false;evBtn.textContent='Chạy đánh giá';});
 };
 async function pollEval(id){
   const j=await(await fetch('/api/evaluate/'+id)).json();
   document.getElementById('ev_log').textContent=j.log||'(đang khởi động…)';
-  if(j.status==='running'){setTimeout(()=>pollEval(id),2000);return;}
+  if(j.status==='running'){setBar('ev_p',100,'⚙️ '+(lastLog(j.log)||'Đang chấm điểm…'),true);setTimeout(()=>pollEval(id),2000);return;}
   const b=document.getElementById('ev_badge');evBtn.disabled=false;evBtn.textContent='Chạy đánh giá';
-  if(j.status==='done'&&j.eval){b.className='badge b-ok';b.textContent='Hoàn tất ✓';renderEval(j.eval);}
-  else{b.className='badge b-err';b.textContent='Lỗi ✕';}
+  if(j.status==='done'&&j.eval){b.className='badge b-ok';b.textContent='Hoàn tất ✓';setBar('ev_p',100,'✓ Xong',false);renderEval(j.eval);}
+  else{b.className='badge b-err';b.textContent='Lỗi ✕';setBar('ev_p',100,'✕ Lỗi — xem nhật ký',false);}
 }
 function evbar(label,val,total,color){const p=total?Math.round(val/total*100):0;
   return `<div style=margin:7px:0><div style="display:flex;justify-content:space-between;font-size:.8rem"><span>${label}</span><span class=muted>${val} (${p}%)</span></div><div class=bar><i style="width:${p}%;background:${color}"></i></div></div>`;}
