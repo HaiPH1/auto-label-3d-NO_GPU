@@ -87,6 +87,9 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--cyan);bo
 textarea{resize:vertical}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 details summary{cursor:pointer;color:var(--cyan);font-size:.84rem;margin-top:10px;font-weight:600}
+.pw{position:relative}.pw input{padding-right:42px}
+.pw .eye{position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;background:none;border:0;font-size:1rem;padding:5px;opacity:.7}
+.pw .eye:hover{opacity:1}
 /* 3D viewport */
 .viewport{position:relative;height:430px;border-radius:18px;overflow:hidden;border:1px solid var(--line2);margin-bottom:20px;
   box-shadow:inset 0 0 90px rgba(0,0,0,.6)}
@@ -164,6 +167,7 @@ pre.out{margin-top:11px;color:#9fc0e6;font-size:.78rem;white-space:pre-wrap;font
    <div class="nav" data-s="assign"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 21c0-3 3-5 6-5s6 2 6 5"/><path d="M17 11l2 2 4-4"/></svg>Phân công</div>
    <div class="nav" data-s="team"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 4v16"/></svg>Nhóm</div>
    <div class="nav" data-s="eval"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1"/></svg>Đánh giá</div>
+   <div class="nav" data-s="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 00-.1-1l2-1.6-2-3.4-2.4 1a7 7 0 00-1.7-1L14.5 2h-5l-.3 2.9a7 7 0 00-1.7 1l-2.4-1-2 3.4 2 1.6a7 7 0 000 2l-2 1.6 2 3.4 2.4-1a7 7 0 001.7 1l.3 2.9h5l.3-2.9a7 7 0 001.7-1l2.4 1 2-3.4-2-1.6a7 7 0 00.1-1z"/></svg>Cài đặt</div>
   </nav>
   <div class="foot">
    <div><span class="stat-dot"></span>GPU <b style="color:var(--ink)">L4</b> · Online</div>
@@ -227,7 +231,7 @@ pre.out{margin-top:11px;color:#9fc0e6;font-size:.78rem;white-space:pre-wrap;font
       <details><summary>Tùy chọn CVAT (mặc định: server này)</summary>
        <label>CVAT URL</label><input name="cvat_url">
        <div class="row2"><div><label>User</label><input name="cvat_user" value="admin"></div>
-       <div><label>Password</label><input name="cvat_pass" type="password" value="Cvat123456"></div></div>
+       <div><label>Password</label><div class="pw"><input name="cvat_pass" type="password" value="Cvat123456"><button type="button" class="eye" onclick="togglePw(this)">👁</button></div></div></div>
       </details>
       <div style="margin-top:20px"><button class="btn" id="btn" style="width:100%">▶ Bắt đầu auto-label</button></div>
      </form>
@@ -304,6 +308,21 @@ annotator2</textarea>
     <div id="ev_result"></div>
    </div>
   </section>
+
+  <!-- CAI DAT -->
+  <section class="sec" id="settings">
+   <div class="glass pad" style="max-width:520px">
+    <div class="hdr"><span class="bar"></span><b>Đổi tài khoản đăng nhập admin</b></div>
+    <p class="sub">Thay tài khoản/mật khẩu đăng nhập vào portal này. Sau khi đổi sẽ phải đăng nhập lại.</p>
+    <label>Mật khẩu hiện tại</label>
+    <div class="pw"><input id="sa_cur" type="password" placeholder="mật khẩu đang dùng"><button type="button" class="eye" onclick="togglePw(this)">👁</button></div>
+    <label>Tài khoản mới</label><input id="sa_user" placeholder="username mới">
+    <label>Mật khẩu mới (≥ 4 ký tự)</label>
+    <div class="pw"><input id="sa_pass" type="password" placeholder="mật khẩu mới"><button type="button" class="eye" onclick="togglePw(this)">👁</button></div>
+    <div style="margin-top:20px"><button class="btn" id="sa_btn">💾 Lưu & đổi tài khoản</button></div>
+    <pre class="out" id="sa_result"></pre>
+   </div>
+  </section>
  </main>
 </div>
 
@@ -311,13 +330,16 @@ annotator2</textarea>
 <script>
 const CVAT = location.protocol+'//'+location.hostname+':8080';
 document.getElementById('cvatlink').href = CVAT;
+// CVAT URL mặc định = server hiện tại
+(function(){const cu=document.querySelector('input[name=cvat_url]');if(cu&&!cu.value)cu.value=CVAT;})();
 
 /* ---------- nav ---------- */
 const TITLES={dash:['Perception Dashboard','Trung tâm điều khiển AI auto-labeling LiDAR 3D'],
  auto:['Auto-label','Sinh nhãn 3D cuboid tự động bằng GPU'],
  assign:['Phân công','Tạo tài khoản & chia việc cho annotator'],
  team:['Nhóm','Theo dõi tiến độ từng annotator'],
- eval:['Đánh giá','Benchmark chất lượng tool so với ground truth']};
+ eval:['Đánh giá','Benchmark chất lượng tool so với ground truth'],
+ settings:['Cài đặt','Quản lý tài khoản đăng nhập portal']};
 document.querySelectorAll('.nav').forEach(n=>n.onclick=()=>{
  document.querySelectorAll('.nav').forEach(x=>x.classList.remove('on'));n.classList.add('on');
  const s=n.dataset.s;document.querySelectorAll('.sec').forEach(x=>x.classList.toggle('on',x.id===s));
@@ -440,6 +462,17 @@ function renderEval(m){
   for(const [k,v] of cls)h+=`<tr><td>${k}</td><td class=mono>${v.total_gt}</td><td class=mono>${v.accept}</td><td class=mono>${v.edit}</td><td class=mono>${v.miss}</td><td class=mono>${(v.mean_iou*100).toFixed(0)}%</td></tr>`;
   h+='</tbody></table></div>';}
  document.getElementById('ev_result').innerHTML=h;}
+
+/* ---------- password eye + settings ---------- */
+function togglePw(btn){const inp=btn.parentElement.querySelector('input');const sh=inp.type==='password';inp.type=sh?'text':'password';btn.textContent=sh?'🙈':'👁';}
+document.getElementById('sa_btn').onclick=async()=>{
+ const b=document.getElementById('sa_btn'),out=document.getElementById('sa_result');
+ const fd=new FormData();fd.append('current_password',document.getElementById('sa_cur').value);
+ fd.append('new_username',document.getElementById('sa_user').value);fd.append('new_password',document.getElementById('sa_pass').value);
+ b.disabled=true;b.textContent='Đang lưu…';out.textContent='';
+ const j=await(await fetch('/api/change-admin',{method:'POST',body:fd})).json();
+ if(j.ok){out.style.color='var(--green)';out.textContent='✓ Đã đổi. Đang đăng xuất để đăng nhập lại bằng tài khoản mới…';setTimeout(()=>location.href='/logout',1500);}
+ else{b.disabled=false;b.textContent='💾 Lưu & đổi tài khoản';out.style.color='var(--red)';out.textContent='✕ '+(j.error||'Lỗi');}};
 
 /* ---------- 3D LiDAR scene ---------- */
 function lidarScene(canvas){

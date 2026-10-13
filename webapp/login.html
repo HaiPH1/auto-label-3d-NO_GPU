@@ -26,6 +26,9 @@ body{margin:0;height:100vh;font-family:Inter,system-ui,sans-serif;color:var(--in
 label{display:block;font-size:.78rem;color:var(--muted);margin:16px 0 6px;font-weight:600}
 input{width:100%;padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:rgba(5,8,15,.8);color:var(--ink);font-size:.95rem}
 input:focus{outline:none;border-color:var(--cyan);box-shadow:0 0 0 3px rgba(34,211,238,.12)}
+.pw{position:relative}.pw input{padding-right:44px}
+.pw .eye{position:absolute;right:9px;top:50%;transform:translateY(-50%);cursor:pointer;background:none;border:0;font-size:1.05rem;padding:5px;opacity:.7}
+.pw .eye:hover{opacity:1}
 .btn{width:100%;margin-top:24px;padding:13px;border:0;border-radius:12px;font-weight:700;font-size:1rem;cursor:pointer;
  color:#04121c;background:linear-gradient(120deg,var(--cyan),var(--indigo));box-shadow:0 8px 28px rgba(34,211,238,.32)}
 .btn:hover{transform:translateY(-1px)}
@@ -41,7 +44,8 @@ input:focus{outline:none;border-color:var(--cyan);box-shadow:0 0 0 3px rgba(34,2
   <div class="brand"><div class="cube">◈</div><div><b>LiDAR<span>3D</span></b></div></div>
   <div class="tag">AUTONOMOUS DRIVING · PERCEPTION LAB</div>
   <label>Tài khoản</label><input name="username" value="admin" autofocus>
-  <label>Mật khẩu</label><input name="password" type="password" placeholder="••••••••">
+  <label>Mật khẩu</label>
+  <div class="pw"><input name="password" type="password" placeholder="••••••••"><button type="button" class="eye" onclick="togglePw(this)">👁</button></div>
   <button class="btn">Đăng nhập</button>
   <div class="err" id="err"></div>
   <div class="foot">Hệ thống AI auto-labeling LiDAR 3D · <span class="mono">TransFusion / GPU</span></div>
@@ -50,6 +54,7 @@ input:focus{outline:none;border-color:var(--cyan);box-shadow:0 0 0 3px rgba(34,2
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 if(location.search.indexOf('e=1')>=0)document.getElementById('err').textContent='Sai tài khoản hoặc mật khẩu';
+function togglePw(btn){const inp=btn.parentElement.querySelector('input');const sh=inp.type==='password';inp.type=sh?'text':'password';btn.textContent=sh?'🙈':'👁';}
 (function(){const cv=document.getElementById('bg');if(!window.THREE)return;
  const rn=new THREE.WebGLRenderer({canvas:cv,antialias:true,alpha:true});rn.setPixelRatio(Math.min(devicePixelRatio,2));
  const W=()=>innerWidth,H=()=>innerHeight;rn.setSize(W(),H(),false);

@@ -34,11 +34,35 @@ CVAT_URL = f"http://{PUBLIC_IP}:8080"
 CVAT_USER = os.environ.get("CVAT_USER", "admin")
 CVAT_PASS = os.environ.get("CVAT_PASS", "Cvat123456")
 
-# Đăng nhập admin của portal
-ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
-ADMIN_PASS = os.environ.get("ADMIN_PASS", "admin123")
+# Đăng nhập admin của portal — lưu ra file để đổi được lúc chạy + giữ qua restart
+ADMIN_FILE = os.path.join(HOME, ".autolabel_admin.json")
 _SECRET = secrets.token_bytes(32)
-_TOKEN = hmac.new(_SECRET, ADMIN_USER.encode(), hashlib.sha256).hexdigest()
+
+
+def _load_admin():
+    try:
+        with open(ADMIN_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+            return d["user"], d["pass"]
+    except Exception:  # noqa: BLE001
+        return os.environ.get("ADMIN_USER", "admin"), os.environ.get("ADMIN_PASS", "admin123")
+
+
+def _save_admin(u, p):
+    with open(ADMIN_FILE, "w", encoding="utf-8") as f:
+        json.dump({"user": u, "pass": p}, f)
+    try:
+        os.chmod(ADMIN_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def _token_for(u):
+    return hmac.new(_SECRET, u.encode(), hashlib.sha256).hexdigest()
+
+
+ADMIN_USER, ADMIN_PASS = _load_admin()
+_TOKEN = _token_for(ADMIN_USER)
 
 app = FastAPI(title="LiDAR3D AutoLabel")
 JOBS = {}  # job_id -> {status, log, task_url}
@@ -175,6 +199,23 @@ async def logout():
     resp = RedirectResponse("/login", status_code=303)
     resp.delete_cookie("sess")
     return resp
+
+
+@app.post("/api/change-admin")
+def api_change_admin(request: Request, current_password: str = Form(...),
+                     new_username: str = Form(...), new_password: str = Form(...)):
+    global ADMIN_USER, ADMIN_PASS, _TOKEN
+    if not authed(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if current_password != ADMIN_PASS:
+        return {"error": "Mật khẩu hiện tại không đúng"}
+    nu, np_ = new_username.strip(), new_password
+    if not nu or len(np_) < 4:
+        return {"error": "Tài khoản trống hoặc mật khẩu < 4 ký tự"}
+    ADMIN_USER, ADMIN_PASS = nu, np_
+    _save_admin(nu, np_)
+    _TOKEN = _token_for(nu)  # token đổi -> phiên cũ hết hạn, phải đăng nhập lại
+    return {"ok": True}
 
 
 @app.get("/login", response_class=HTMLResponse)
