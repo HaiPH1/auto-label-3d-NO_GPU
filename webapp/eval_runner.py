@@ -21,16 +21,24 @@ def main():
         print(f"[ERROR] Không thấy {pcd_dir}")
         sys.exit(1)
 
-    print("[1/3] Inference bằng tool (TransFusion)...")
+    print("[1/4] Inference bằng tool (TransFusion)...")
     run.download_checkpoint()
     preds = run.run_inference(pcd_dir, os.path.join(os.path.dirname(out_json), "eval_preds.json"))
 
-    print("[2/3] Nạp ground truth...")
+    print("[2/4] Hậu xử lý như lúc đẩy CVAT (heading correction + tracking)...")
+    try:
+        preds = run.correct_heading(preds, pcd_dir)
+        preds = run.track_objects(preds, max_dist=5.0)
+    except Exception as e:  # noqa: BLE001
+        print(f"  (bỏ qua hậu xử lý: {e})")
+    print(f"  Output cuối: {sum(len(r.get('boxes', [])) for r in preds)} boxes")
+
+    print("[3/4] Nạp ground truth...")
     with open(gt_file) as f:
         gt = json.load(f)
     print(f"  GT: {sum(len(r.get('boxes', [])) for r in gt)} boxes / {len(gt)} frames")
 
-    print("[3/3] So sánh tool vs GT...")
+    print("[4/4] So sánh output tool vs GT...")
     stats = run.evaluate_predictions(preds, gt)
     run.save_evaluation_json(stats, out_json, model_name="tool")
     print("EVAL_DONE")
