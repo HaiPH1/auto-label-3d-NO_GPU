@@ -8,6 +8,7 @@ Chạy (systemd service autolabel-web, hoặc tay):
 """
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
@@ -76,6 +77,71 @@ def run_job(job_id, data_dir, cvat_url, user, password, task_name):
         job["status"] = "done" if proc.returncode == 0 else "error"
     except Exception as e:  # noqa: BLE001
         job["log"] += f"\n>>> LỖI backend: {e}\n"
+        job["status"] = "error"
+
+
+# ---------------------------------------------------------------- evaluate ----
+EVAL_RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_runner.py")
+
+
+def load_gt_file(path):
+    """Nạp GT từ file: JSON trực tiếp, hoặc ZIP export (Datumaro) -> lấy .json lớn nhất."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as z:
+            jsons = [n for n in z.namelist() if n.endswith(".json")]
+            if not jsons:
+                raise ValueError("ZIP GT không có file .json")
+            jsons.sort(key=lambda n: z.getinfo(n).file_size, reverse=True)
+            with z.open(jsons[0]) as f:
+                return json.load(f)
+    raise ValueError("GT không đọc được (không phải JSON hoặc ZIP)")
+
+
+def gt_to_pred_format(raw):
+    """Chuẩn hoá GT về format tool: [{frame, boxes:[{label,center,size,yaw}]}]."""
+    if isinstance(raw, list) and raw and isinstance(raw[0], dict) and "boxes" in raw[0]:
+        return raw
+    if isinstance(raw, dict) and "items" in raw:  # Datumaro 3D
+        cats = (raw.get("categories", {}) or {}).get("label", {}) or {}
+        lmap = {i: l.get("name", str(i)) for i, l in enumerate(cats.get("labels", []))}
+        frames = []
+        for idx, item in enumerate(raw["items"]):
+            boxes = []
+            for a in item.get("annotations", []):
+                if a.get("type") in ("cuboid_3d", "cuboid"):
+                    rot = a.get("rotation", [0, 0, 0])
+                    boxes.append({"label": lmap.get(a.get("label_id", -1), str(a.get("label_id"))),
+                                  "center": a.get("position", [0, 0, 0]),
+                                  "size": a.get("scale", [1, 1, 1]),
+                                  "yaw": rot[2] if len(rot) > 2 else 0.0})
+            frames.append({"frame": idx, "num_boxes": len(boxes), "boxes": boxes})
+        return frames
+    raise ValueError("GT không đúng định dạng (cần JSON tool hoặc Datumaro 3D)")
+
+
+def run_eval_job(job_id, data_dir, gt_path):
+    job = JOBS[job_id]
+    out_json = os.path.join(JOBS_DIR, job_id, "eval.json")
+    cmd = [VENV_PY, EVAL_RUNNER, data_dir, gt_path, out_json]
+    try:
+        proc = subprocess.Popen(cmd, cwd=os.path.dirname(RUN_PY),
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        for line in proc.stdout:
+            job["log"] += line
+        proc.wait()
+        if proc.returncode == 0 and os.path.exists(out_json):
+            with open(out_json) as f:
+                job["eval"] = json.load(f)
+            job["status"] = "done"
+        else:
+            job["status"] = "error"
+    except Exception as e:  # noqa: BLE001
+        job["log"] += f"\n>>> LỖI: {e}\n"
         job["status"] = "error"
 
 
@@ -207,6 +273,49 @@ def api_team(request: Request):
         return {"ok": True, "rows": rows}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/evaluate")
+def api_evaluate(request: Request, data: UploadFile = File(...), gt: UploadFile = File(...)):
+    if not authed(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    job_id = "ev" + uuid.uuid4().hex[:6]
+    jdir = os.path.join(JOBS_DIR, job_id)
+    os.makedirs(jdir, exist_ok=True)
+    dz = os.path.join(jdir, "data.zip")
+    with open(dz, "wb") as f:
+        shutil.copyfileobj(data.file, f)
+    try:
+        with zipfile.ZipFile(dz) as z:
+            z.extractall(os.path.join(jdir, "data"))
+    except zipfile.BadZipFile:
+        return JSONResponse({"error": "Data không phải .zip hợp lệ"}, status_code=400)
+    data_dir = find_data_dir(os.path.join(jdir, "data"))
+    if not data_dir:
+        return JSONResponse({"error": "Không thấy pointcloud/ trong data.zip"}, status_code=400)
+    gt_raw = os.path.join(jdir, "gt_raw")
+    with open(gt_raw, "wb") as f:
+        shutil.copyfileobj(gt.file, f)
+    try:
+        conv = gt_to_pred_format(load_gt_file(gt_raw))
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": f"GT lỗi: {e}"}, status_code=400)
+    gt_path = os.path.join(jdir, "gt.json")
+    with open(gt_path, "w") as f:
+        json.dump(conv, f)
+    JOBS[job_id] = {"status": "running", "log": "", "eval": None}
+    threading.Thread(target=run_eval_job, args=(job_id, data_dir, gt_path), daemon=True).start()
+    return {"job_id": job_id}
+
+
+@app.get("/api/evaluate/{job_id}")
+def api_evaluate_status(request: Request, job_id: str):
+    if not authed(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    job = JOBS.get(job_id)
+    if not job:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {"status": job["status"], "log": job["log"][-4000:], "eval": job.get("eval")}
 
 
 # -------------------------------------------------------------------- HTML -----
@@ -365,12 +474,21 @@ details summary{cursor:pointer;color:var(--cyan);font-size:.85rem;margin-top:8px
   </section>
 
   <section class=sec id=eval>
-   <div class=card style=max-width:640px>
-    <b>Đánh giá chất lượng (Ground Truth)</b>
-    <p class=muted style=font-size:.86rem>Upload tập nhãn chuẩn → so với pre-label: 3D IoU, Accept/Edit/Reject/Miss, heading error, theo class.</p>
-    <label>File ground truth (.json)</label><input type=file accept=.json>
-    <div style=margin-top:16px><button class=btn>Chạy đánh giá</button></div>
-    <p class=soon style=margin-top:12px>⏳ Tái dùng <span class=mono>run.py --evaluate</span> + vẽ chart — bật khi VM chạy.</p>
+   <div class=card style=max-width:680px>
+    <b>Đánh giá chất lượng TOOL</b> <span class=muted>(so tool vs ground truth)</span>
+    <p class=muted style=font-size:.86rem>Đẩy <b>2 luồng</b>: data để tool tự gán + ground truth (đáp án). Tool chạy inference rồi chấm: % Giữ/Sửa/Xóa/Bổ sung, 3D IoU, heading, theo class.</p>
+    <label>1️⃣ Data point cloud (.zip chứa <b>pointcloud/*.pcd</b>)</label>
+    <input type=file id=ev_data accept=.zip>
+    <label>2️⃣ Ground truth — <b>Datumaro 3D</b> (.json hoặc .zip export từ CVAT), hoặc JSON của tool</label>
+    <input type=file id=ev_gt accept=".json,.zip">
+    <div style=margin-top:16px><button class=btn id=ev_btn>Chạy đánh giá</button></div>
+   </div>
+   <div class="card hidden" id=ev_prog style=max-width:680px;margin-top:14px>
+    <div>Trạng thái: <span id=ev_badge class="badge b-run">Đang chạy…</span></div>
+    <div id=ev_result style=margin-top:14px></div>
+    <details style=margin-top:10px><summary>Nhật ký</summary>
+      <div id=ev_log class=mono style="background:#060b16;border:1px solid var(--line);border-radius:9px;padding:10px;font-size:.74rem;white-space:pre-wrap;max-height:220px;overflow:auto;color:#aebdd8;margin-top:8px"></div>
+    </details>
    </div>
   </section>
  </main>
@@ -413,6 +531,48 @@ async function loadTeam(){const b=document.getElementById('team_body');b.innerHT
     <td class=muted>${(r.last||'').slice(0,16).replace('T',' ')}</td></tr>`}).join('');}
 document.getElementById('team_refresh').onclick=loadTeam;
 document.getElementById('as_btn').onclick=()=>alert('Backend phân công sẽ bật ở bước sau (khi VM chạy).');
+// ===== Đánh giá =====
+const evBtn=document.getElementById('ev_btn');
+evBtn.onclick=async()=>{
+  const d=document.getElementById('ev_data').files[0], g=document.getElementById('ev_gt').files[0];
+  if(!d||!g){alert('Chọn cả Data và Ground truth');return;}
+  const fd=new FormData();fd.append('data',d);fd.append('gt',g);
+  evBtn.disabled=true;evBtn.textContent='Đang tải lên…';
+  const r=await fetch('/api/evaluate',{method:'POST',body:fd});const j=await r.json();
+  if(j.error){alert(j.error);evBtn.disabled=false;evBtn.textContent='Chạy đánh giá';return;}
+  document.getElementById('ev_prog').classList.remove('hidden');pollEval(j.job_id);
+};
+async function pollEval(id){
+  const j=await(await fetch('/api/evaluate/'+id)).json();
+  document.getElementById('ev_log').textContent=j.log||'(đang khởi động…)';
+  if(j.status==='running'){setTimeout(()=>pollEval(id),2000);return;}
+  const b=document.getElementById('ev_badge');evBtn.disabled=false;evBtn.textContent='Chạy đánh giá';
+  if(j.status==='done'&&j.eval){b.className='badge b-ok';b.textContent='Hoàn tất ✓';renderEval(j.eval);}
+  else{b.className='badge b-err';b.textContent='Lỗi ✕';}
+}
+function evbar(label,val,total,color){const p=total?Math.round(val/total*100):0;
+  return `<div style=margin:7px:0><div style="display:flex;justify-content:space-between;font-size:.8rem"><span>${label}</span><span class=muted>${val} (${p}%)</span></div><div class=bar><i style="width:${p}%;background:${color}"></i></div></div>`;}
+function renderEval(m){
+  const tot=(m.accept+m.edit+m.reject+m.miss)||1;
+  const acc=m.total_gt?Math.round((m.accept+m.edit)/m.total_gt*100):0;
+  let h=`<div class=tiles>
+   <div class=tile><div class=n>${(m.mean_iou*100).toFixed(0)}%</div><div class=l>IoU trung bình</div></div>
+   <div class=tile><div class=n>${acc}%</div><div class=l>Bắt đúng GT</div></div>
+   <div class=tile><div class=n>${m.total_pred}</div><div class=l>Box tool gán</div></div>
+   <div class=tile><div class=n>${(m.mean_heading_error_deg||0).toFixed(1)}°</div><div class=l>Lỗi hướng TB</div></div>
+  </div>
+  <div class=card><b>Chất lượng pre-label (so với GT)</b>
+   ${evbar('✅ Giữ nguyên (đúng, IoU≥0.7)',m.accept,tot,'#34d399')}
+   ${evbar('✏️ Phải sửa (lệch, 0.25≤IoU<0.7)',m.edit,tot,'#fbbf24')}
+   ${evbar('❌ Thừa/sai (xóa)',m.reject,tot,'#f87171')}
+   ${evbar('➕ Bỏ sót (bổ sung)',m.miss,tot,'#60a5fa')}
+  </div>`;
+  const cls=Object.entries(m.per_class||{}).filter(([k,v])=>v.total_gt||v.total_pred);
+  if(cls.length){h+=`<div class=card style=margin-top:12px><b>Theo class</b><table style=margin-top:8px><thead><tr><th>Class</th><th>GT</th><th>Giữ</th><th>Sửa</th><th>Sót</th><th>IoU</th></tr></thead><tbody>`;
+   for(const [k,v] of cls){h+=`<tr><td>${k}</td><td>${v.total_gt}</td><td>${v.accept}</td><td>${v.edit}</td><td>${v.miss}</td><td>${(v.mean_iou*100).toFixed(0)}%</td></tr>`;}
+   h+='</tbody></table></div>';}
+  document.getElementById('ev_result').innerHTML=h;
+}
 __CLOUD__
 </script></body></html>""".replace("__STYLE__", _STYLE).replace("__CVAT__", CVAT_URL)
 
