@@ -295,8 +295,8 @@ annotator2</textarea>
      <p class="sub">Tool chạy inference trên data → so với ground truth → chấm % Giữ/Sửa/Xóa/Bổ sung, 3D IoU, heading.</p>
      <label>① Data point cloud (chọn có sẵn trên server — nhanh, hoặc upload mới)</label>
      <select id="ev_dataset"></select>
-     <div id="ev_dataup" style="margin-top:8px;display:none"><input type="file" id="ev_data" accept=".zip"></div>
-     <label>② Ground truth — Datumaro 3D (.json/.zip export từ CVAT) hoặc JSON tool</label>
+     <div id="ev_dataup" style="margin-top:8px;display:none"><input type="file" id="ev_data" accept=".zip,.tgz,.tar,.gz"></div>
+     <label>② Ground truth <span style="color:var(--dim)">(tùy chọn — bỏ trống nếu data đã có GT, vd nuScenes thô)</span></label>
      <input type="file" id="ev_gt" accept=".json,.zip">
      <div style="margin-top:18px"><button class="btn" id="ev_btn">◎ Chạy đánh giá</button></div>
      <div class="glass pad hidden" id="ev_prog" style="margin-top:16px;background:rgba(6,11,22,.5)">
@@ -423,14 +423,14 @@ fetch('/api/datasets').then(r=>r.json()).then(d=>{const ds=d.datasets||[];
 evSel.onchange=updDataup;
 evBtn.onclick=()=>{
  const g=document.getElementById('ev_gt').files[0];
- if(!g){alert('Chọn file Ground truth');return;}
- const fd=new FormData();fd.append('gt',g);
+ const fd=new FormData();
+ if(g)fd.append('gt',g);
  if(evSel.value){fd.append('dataset',evSel.value);}
  else{const d=document.getElementById('ev_data').files[0];if(!d){alert('Chọn data có sẵn hoặc upload data');return;}fd.append('data',d);}
  evBtn.disabled=true;evBtn.textContent='Đang chạy…';
  document.getElementById('ev_prog').classList.remove('hidden');document.getElementById('ev_result').innerHTML='';
  setBar('ev_p',0,'Chuẩn bị tải lên…',false);
- uploadXHR('/api/evaluate',fd,p=>setBar('ev_p',p,'📤 Đang tải GT lên… '+p+'%',false))
+ uploadXHR('/api/evaluate',fd,p=>setBar('ev_p',p,'📤 Đang tải lên… '+p+'%',false))
   .then(j=>{if(j.error){alert(j.error);evBtn.disabled=false;evBtn.textContent='◎ Chạy đánh giá';return;}
     setBar('ev_p',100,'⚙️ Đang chấm điểm (inference + so sánh)…',true);pollEval(j.job_id);})
   .catch(()=>{alert('Lỗi mạng');evBtn.disabled=false;evBtn.textContent='◎ Chạy đánh giá';});};

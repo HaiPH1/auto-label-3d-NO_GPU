@@ -17,6 +17,10 @@ import sys
 import numpy as np
 from nuscenes.nuscenes import NuScenes
 from nuscenes.eval.common.utils import quaternion_yaw
+from nuscenes.utils.geometry_utils import transform_matrix
+from pyquaternion import Quaternion
+
+NSWEEPS = 10  # model nuScenes được train trên 10 sweep gộp (MAX_SWEEPS=10)
 
 CAMS = ["CAM_FRONT", "CAM_FRONT_LEFT", "CAM_FRONT_RIGHT",
         "CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT"]
@@ -61,14 +65,48 @@ def inv_rigid(R, t):
     return mat4(Rt, ti)
 
 
-def write_binary_pcd(path, pts):
-    n = pts.shape[0]
-    header = ("# .PCD v0.7\nVERSION 0.7\nFIELDS x y z intensity\nSIZE 4 4 4 4\n"
-              "TYPE F F F F\nCOUNT 1 1 1 1\n"
+def write_binary_pcd(path, pts, fields):
+    n, nf = pts.shape[0], len(fields)
+    header = (f"# .PCD v0.7\nVERSION 0.7\nFIELDS {' '.join(fields)}\n"
+              f"SIZE {' '.join(['4'] * nf)}\nTYPE {' '.join(['F'] * nf)}\n"
+              f"COUNT {' '.join(['1'] * nf)}\n"
               f"WIDTH {n}\nHEIGHT 1\nVIEWPOINT 0 0 0 1 0 0 0\nPOINTS {n}\nDATA binary\n")
     with open(path, "wb") as f:
         f.write(header.encode("ascii"))
         f.write(pts.astype(np.float32).tobytes())
+
+
+def load_multisweep(nusc, sample, nsweeps=NSWEEPS, min_dist=1.0):
+    """Gộp tối đa `nsweeps` quét LiDAR về frame keyframe (bù chuyển động ego), trả
+    Nx5 [x,y,z,intensity,time]. Bỏ qua sweep thiếu file -> data đầy đủ được 10 sweep,
+    data chỉ có keyframe vẫn chạy (1 sweep)."""
+    ref_sd = nusc.get("sample_data", sample["data"]["LIDAR_TOP"])
+    ref_cs = nusc.get("calibrated_sensor", ref_sd["calibrated_sensor_token"])
+    ref_pose = nusc.get("ego_pose", ref_sd["ego_pose_token"])
+    ref_time = 1e-6 * ref_sd["timestamp"]
+    ref_from_car = transform_matrix(ref_cs["translation"], Quaternion(ref_cs["rotation"]), inverse=True)
+    car_from_global = transform_matrix(ref_pose["translation"], Quaternion(ref_pose["rotation"]), inverse=True)
+
+    chunks = []
+    sd = ref_sd
+    for _ in range(nsweeps):
+        path = os.path.join(nusc.dataroot, sd["filename"])
+        if os.path.exists(path):
+            pc = np.fromfile(path, dtype=np.float32).reshape(-1, 5)[:, :4].T  # 4xn
+            keep = np.sqrt(pc[0] ** 2 + pc[1] ** 2) > min_dist
+            pc = pc[:, keep]
+            cs = nusc.get("calibrated_sensor", sd["calibrated_sensor_token"])
+            pose = nusc.get("ego_pose", sd["ego_pose_token"])
+            global_from_car = transform_matrix(pose["translation"], Quaternion(pose["rotation"]), inverse=False)
+            car_from_cur = transform_matrix(cs["translation"], Quaternion(cs["rotation"]), inverse=False)
+            trans = ref_from_car @ car_from_global @ global_from_car @ car_from_cur
+            xyz = (trans @ np.vstack([pc[:3, :], np.ones(pc.shape[1])]))[:3, :]
+            tlag = ref_time - 1e-6 * sd["timestamp"]
+            chunks.append(np.vstack([xyz, pc[3, :], np.full(pc.shape[1], tlag)]))  # 5xn
+        if sd["prev"] == "":
+            break
+        sd = nusc.get("sample_data", sd["prev"])
+    return np.concatenate(chunks, axis=1).T.astype(np.float32)
 
 
 def scene_has_files(nusc, scene):
@@ -107,11 +145,13 @@ def convert(nusc, scene, out_dir):
     frame = 0
     while token:
         sample = nusc.get("sample", token)
-        lidar_path, boxes, _ = nusc.get_sample_data(sample["data"]["LIDAR_TOP"])
-        raw = np.fromfile(lidar_path, dtype=np.float32).reshape(-1, 5)
-        write_binary_pcd(os.path.join(pcd_dir, f"frame_{frame}.pcd"), raw[:, :4])
+        _, boxes, _ = nusc.get_sample_data(sample["data"]["LIDAR_TOP"])
+        pts5 = load_multisweep(nusc, sample)  # Nx5: x,y,z,intensity,time (10 sweep)
+        # zero-pad để sort theo chữ cái == thứ tự số (khớp eval + CVAT frame order)
+        write_binary_pcd(os.path.join(pcd_dir, f"frame_{frame:03d}.pcd"), pts5,
+                         ["x", "y", "z", "intensity", "timestamp"])
 
-        cdir = os.path.join(out_dir, "context_images", f"frame_{frame}")
+        cdir = os.path.join(out_dir, "context_images", f"frame_{frame:03d}")
         os.makedirs(cdir, exist_ok=True)
         for cam in CAMS:
             if cam not in sample["data"]:

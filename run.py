@@ -40,6 +40,7 @@ import glob
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -291,11 +292,16 @@ def download_checkpoint():
 
 
 def load_pcd(path):
+    """Đọc PCD binary/ascii. Suy số trường từ FIELDS (hỗ trợ 4 trường x,y,z,intensity/rgb
+    hoặc 5 trường x,y,z,intensity,timestamp — nuScenes 10-sweep). Giả định mỗi trường 4 byte."""
     with open(path, 'rb') as f:
         n_points = 0
+        n_fields = 4
         data_type = 'binary'
         while True:
             line = f.readline().decode('ascii', 'ignore').strip()
+            if line.startswith('FIELDS'):
+                n_fields = max(1, len(line.split()) - 1)
             if line.startswith('POINTS'):
                 n_points = int(line.split()[1])
             if line.startswith('DATA'):
@@ -304,8 +310,8 @@ def load_pcd(path):
                 break
 
         if data_type == 'binary':
-            data = f.read(n_points * 16)
-            pts = np.frombuffer(data, dtype=np.float32).reshape(-1, 4)
+            data = f.read(n_points * n_fields * 4)
+            pts = np.frombuffer(data, dtype=np.float32).reshape(-1, n_fields)
         else:
             f.seek(0)
             lines = f.readlines()
@@ -317,7 +323,6 @@ def load_pcd(path):
             pts = np.loadtxt(lines[data_start:], dtype=np.float32)
             if pts.ndim == 1:
                 pts = pts.reshape(1, -1)
-            pts = pts[:, :4]
     return pts
 
 
@@ -363,9 +368,14 @@ def run_inference(pcd_dir, output_path):
             pcd_path = self.pcd_files[index]
             base_name = os.path.splitext(os.path.basename(pcd_path))[0]
             frame_id = int(base_name) if base_name.isdigit() else index
-            points = load_pcd(pcd_path)
-            timestamps = np.zeros((points.shape[0], 1), dtype=np.float32)
-            points = np.hstack([points, timestamps])
+            points = load_pcd(pcd_path).astype(np.float32)
+            # Model cần 5 trường (x,y,z,intensity,timestamp). PCD 5 trường (nuScenes 10-sweep)
+            # dùng thẳng; PCD 4 trường (data_day14) đệm timestamp=0.
+            if points.shape[1] >= 5:
+                points = points[:, :5]
+            else:
+                pad = np.zeros((points.shape[0], 5 - points.shape[1]), dtype=np.float32)
+                points = np.hstack([points, pad])
             return self.prepare_data(data_dict={'points': points, 'frame_id': frame_id})
 
     dataset = PCDDataset(cfg.DATA_CONFIG, class_names, pcd_dir)
@@ -860,8 +870,18 @@ def _color_for_track(track_id):
 
 
 def find_camera_image(ctx_dir, frame_stem, camera_name, camera_index=1):
-    """Find the camera image file for a frame."""
+    """Find the camera image file for a frame. Khớp thư mục theo tên; nếu không có thì
+    khớp theo SỐ frame (vd frame_0 ↔ frame_000 ↔ 0) cho đồng bộ naming."""
     frame_dir = os.path.join(ctx_dir, frame_stem)
+    if not os.path.isdir(frame_dir):
+        m = re.search(r'(\d+)\s*$', frame_stem)
+        if m and os.path.isdir(ctx_dir):
+            num = int(m.group(1))
+            for d in sorted(os.listdir(ctx_dir)):
+                dm = re.search(r'(\d+)\s*$', d)
+                if dm and int(dm.group(1)) == num and os.path.isdir(os.path.join(ctx_dir, d)):
+                    frame_dir = os.path.join(ctx_dir, d)
+                    break
     if not os.path.isdir(frame_dir):
         return None
 

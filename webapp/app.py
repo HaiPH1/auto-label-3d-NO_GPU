@@ -469,6 +469,15 @@ def list_datasets():
     base = os.path.join(HOME, "data_day14")
     if os.path.isdir(os.path.join(base, "pointcloud")):
         out.append({"id": "data_day14", "label": "data_day14 (mẫu)", "dir": base})
+    # Bộ mẫu dựng sẵn: thả thư mục có pointcloud/ vào ~/sample_datasets/ là tự thành "(mẫu)"
+    samples_dir = os.path.join(HOME, "sample_datasets")
+    if os.path.isdir(samples_dir):
+        for name in sorted(os.listdir(samples_dir)):
+            dd = os.path.join(samples_dir, name)
+            pc = os.path.join(dd, "pointcloud")
+            if os.path.isdir(pc):
+                n = len([f for f in os.listdir(pc) if f.endswith(".pcd")])
+                out.append({"id": "sample_" + name, "label": f"{name} (mẫu) · {n} frames", "dir": dd})
     try:
         for d in sorted(os.listdir(JOBS_DIR), reverse=True):
             jd = os.path.join(JOBS_DIR, d)
@@ -488,6 +497,59 @@ def api_datasets(request: Request):
     return {"datasets": [{"id": x["id"], "label": x["label"]} for x in list_datasets()]}
 
 
+def run_eval_pipeline(job_id, kind, src, gt_up):
+    """Nếu src là nuScenes thô -> convert 1 scene (tự có gt.json) rồi đánh giá.
+    GT: ưu tiên file upload; không có thì dùng data_dir/gt.json (tự tách)."""
+    job = JOBS[job_id]
+    jdir = os.path.join(JOBS_DIR, job_id)
+    try:
+        if kind == "nuscenes":
+            job["log"] += "[ingest] nuScenes thô → convert 1 scene để đánh giá...\n"
+            lst = subprocess.run([INGEST_PY, "-I", NUSCENES_INGEST, "list", src],
+                                 cwd=os.path.dirname(RUN_PY), stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True, timeout=1200)
+            scenes = [s.strip() for s in lst.stdout.splitlines()
+                      if s.strip() and not s.lstrip().startswith("[")]
+            if not scenes:
+                job["log"] += lst.stdout + "\n[ingest] không có scene hợp lệ.\n"
+                job["status"] = "error"
+                return
+            sc = scenes[0]
+            data_dir = os.path.join(jdir, "data", sc)
+            conv = subprocess.run([INGEST_PY, "-I", NUSCENES_INGEST, "convert", src, sc, data_dir],
+                                  cwd=os.path.dirname(RUN_PY), stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True, timeout=3600)
+            job["log"] += conv.stdout
+            if conv.returncode != 0 or not os.path.isdir(os.path.join(data_dir, "pointcloud")):
+                job["log"] += "[ingest] convert lỗi.\n"
+                job["status"] = "error"
+                return
+        else:
+            data_dir = src
+
+        if gt_up:
+            gt_raw = gt_up
+        else:
+            gt_raw = os.path.join(data_dir, "gt.json")
+            if not os.path.exists(gt_raw):
+                job["log"] += "Chưa có GT (upload file GT, hoặc dùng data có sẵn gt.json).\n"
+                job["status"] = "error"
+                return
+        try:
+            conv_gt = gt_to_pred_format(load_gt_file(gt_raw))
+        except Exception as e:  # noqa: BLE001
+            job["log"] += f"GT lỗi: {e}\n"
+            job["status"] = "error"
+            return
+        gt_path = os.path.join(jdir, "gt.json")
+        with open(gt_path, "w") as f:
+            json.dump(conv_gt, f)
+        run_eval_job(job_id, data_dir, gt_path)  # inference + chấm + set status
+    except Exception as e:  # noqa: BLE001
+        job["log"] += f"\n>>> LỖI eval: {e}\n"
+        job["status"] = "error"
+
+
 @app.post("/api/evaluate")
 def api_evaluate(request: Request, gt: UploadFile = File(None),
                  data: UploadFile = File(None), dataset: str = Form(None)):
@@ -496,46 +558,49 @@ def api_evaluate(request: Request, gt: UploadFile = File(None),
     job_id = "ev" + uuid.uuid4().hex[:6]
     jdir = os.path.join(JOBS_DIR, job_id)
     os.makedirs(jdir, exist_ok=True)
-    if dataset:  # dùng data có sẵn trên server (không phải upload lại)
+    kind, src = None, None
+    if dataset:  # dùng data có sẵn trên server
         ds = {x["id"]: x["dir"] for x in list_datasets()}
-        data_dir = ds.get(dataset)
-        if not data_dir:
+        src = ds.get(dataset)
+        if not src:
             return JSONResponse({"error": "Dataset không hợp lệ"}, status_code=400)
+        kind = "dir"
     elif data is not None and data.filename:
-        dz = os.path.join(jdir, "data.zip")
-        with open(dz, "wb") as f:
+        up = os.path.join(jdir, "data_up" + os.path.splitext(data.filename)[1].lower())
+        with open(up, "wb") as f:
             shutil.copyfileobj(data.file, f)
+        raw = os.path.join(jdir, "data")
         try:
-            with zipfile.ZipFile(dz) as z:
-                z.extractall(os.path.join(jdir, "data"))
-        except zipfile.BadZipFile:
-            return JSONResponse({"error": "Data không phải .zip hợp lệ"}, status_code=400)
-        data_dir = find_data_dir(os.path.join(jdir, "data"))
-        if not data_dir:
-            return JSONResponse({"error": "Không thấy pointcloud/ trong data.zip"}, status_code=400)
+            if zipfile.is_zipfile(up):
+                with zipfile.ZipFile(up) as z:
+                    z.extractall(raw)
+            elif tarfile.is_tarfile(up):
+                with tarfile.open(up) as t:
+                    t.extractall(raw)  # noqa: S202
+            else:
+                return JSONResponse({"error": "Data phải là .zip hoặc .tar/.tgz"}, status_code=400)
+        except (zipfile.BadZipFile, tarfile.TarError) as e:
+            return JSONResponse({"error": f"Giải nén data lỗi: {e}"}, status_code=400)
+        dd = find_data_dir(raw)
+        if dd:
+            kind, src = "dir", dd
+        elif find_nuscenes_root(raw):
+            kind, src = "nuscenes", find_nuscenes_root(raw)
+        else:
+            return JSONResponse(
+                {"error": "Không thấy pointcloud/ và cũng không phải nuScenes thô"}, status_code=400)
     else:
         return JSONResponse({"error": "Chọn dataset có sẵn hoặc upload data"}, status_code=400)
+
+    gt_up = None
     if gt is not None and gt.filename:
-        gt_raw = os.path.join(jdir, "gt_raw")
-        with open(gt_raw, "wb") as f:
+        gt_up = os.path.join(jdir, "gt_raw")
+        with open(gt_up, "wb") as f:
             shutil.copyfileobj(gt.file, f)
-    else:
-        # Không upload GT -> dùng gt.json có sẵn của dataset (vd data nuScenes đã ingest)
-        gt_raw = os.path.join(data_dir, "gt.json")
-        if not os.path.exists(gt_raw):
-            return JSONResponse(
-                {"error": "Chưa có GT: upload file GT, hoặc chọn dataset đã có sẵn gt.json"},
-                status_code=400)
-    try:
-        conv = gt_to_pred_format(load_gt_file(gt_raw))
-    except Exception as e:  # noqa: BLE001
-        return JSONResponse({"error": f"GT lỗi: {e}"}, status_code=400)
-    gt_path = os.path.join(jdir, "gt.json")
-    with open(gt_path, "w") as f:
-        json.dump(conv, f)
+
     JOBS[job_id] = {"status": "running", "log": "", "eval": None}
-    threading.Thread(target=run_eval_job, args=(job_id, data_dir, gt_path), daemon=True).start()
-    return {"job_id": job_id}
+    threading.Thread(target=run_eval_pipeline, args=(job_id, kind, src, gt_up), daemon=True).start()
+    return {"job_id": job_id, "nuscenes": kind == "nuscenes"}
 
 
 @app.get("/api/evaluate/{job_id}")
