@@ -224,14 +224,14 @@ pre.out{margin-top:11px;color:#9fc0e6;font-size:.78rem;white-space:pre-wrap;font
      <p class="sub">Upload point cloud → tool tự sinh 3D cuboid trên GPU → đẩy vào CVAT.</p>
      <form id="f">
       <label>Tên task</label><input name="task_name" value="Auto Label 3D" required>
-      <label>Dataset (.zip chứa pointcloud/*.pcd)</label>
-      <div class="drop" id="drop"><div class="big">📦</div><div class="t">Kéo thả hoặc bấm chọn file .zip</div>
-       <div class="s">pointcloud/*.pcd (+ context_images/ nếu có)</div>
-       <input type="file" name="file" id="fileinp" accept=".zip" required><div class="fname" id="fname"></div></div>
+      <label>Dataset (.zip/.tgz) — tool tự nhận dạng format</label>
+      <div class="drop" id="drop"><div class="big">📦</div><div class="t">Kéo thả hoặc bấm chọn file .zip / .tgz</div>
+       <div class="s">• Đã xử lý: pointcloud/*.pcd (+ context_images/, calib.json)<br>• <b>nuScenes thô</b>: cả v1.0-*/ + samples/ (tự convert, không cần xử lý trước)</div>
+       <input type="file" name="file" id="fileinp" accept=".zip,.tgz,.tar,.gz" required><div class="fname" id="fname"></div></div>
       <details><summary>Tùy chọn CVAT (mặc định: server này)</summary>
        <label>CVAT URL</label><input name="cvat_url">
        <div class="row2"><div><label>User</label><input name="cvat_user" value="admin"></div>
-       <div><label>Password</label><div class="pw"><input name="cvat_pass" type="password" value="Cvat123456"><button type="button" class="eye" onclick="togglePw(this)">👁</button></div></div></div>
+       <div><label>Password</label><div class="pw"><input name="cvat_pass" type="password" placeholder="mật khẩu CVAT"><button type="button" class="eye" onclick="togglePw(this)">👁</button></div></div></div>
       </details>
       <div style="margin-top:20px"><button class="btn" id="btn" style="width:100%">▶ Bắt đầu auto-label</button></div>
      </form>

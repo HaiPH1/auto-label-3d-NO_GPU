@@ -1,10 +1,14 @@
+import os
 import random
 import requests
 
-BASE = "http://34.87.125.249:8080"
+# Cấu hình qua biến môi trường (không hardcode secret trong repo)
+BASE = os.environ.get("CVAT_URL", "http://localhost:8080")
+CVAT_USER = os.environ.get("CVAT_USER", "admin")
+CVAT_PASS = os.environ.get("CVAT_PASS", "")
 s = requests.Session()
 
-r = s.post(BASE + "/api/auth/login", json={"username": "admin", "password": "Cvat123456"})
+r = s.post(BASE + "/api/auth/login", json={"username": CVAT_USER, "password": CVAT_PASS})
 print("login:", r.status_code)
 tok = r.json()["key"]
 H = {"Authorization": "Token " + tok}

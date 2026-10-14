@@ -1516,13 +1516,20 @@ def step3_upload(config, preds, calib_path=None, tracking_cfg=None,
 
     calib = None
     if calib_path:
-        calib = load_calibration(calib_path)
-        if calib:
-            preds = project_predictions(preds, calib)
+        try:
+            calib = load_calibration(calib_path)
+            if calib:
+                preds = project_predictions(preds, calib)
+        except Exception as e:  # noqa: BLE001 — overlay/projection không được chặn upload
+            print(f"  [WARN] Bỏ qua chiếu 3D->2D (lỗi calib): {e}")
+            calib = None
 
     if overlay and calib:
-        print("\n  Camera overlay...")
-        generate_overlays(preds, calib, ctx_dir, overlay_output, camera_index)
+        try:
+            print("\n  Camera overlay...")
+            generate_overlays(preds, calib, ctx_dir, overlay_output, camera_index)
+        except Exception as e:  # noqa: BLE001 — lỗi overlay không được chặn upload
+            print(f"  [WARN] Bỏ qua vẽ overlay: {e}")
 
     return upload_to_cvat(config, preds)
 

@@ -71,7 +71,8 @@ def check_calibration(calib: dict, cameras: dict[str, str]) -> None:
             raise ConfigError(f"{name}.dist must hold at most five numbers (k1 k2 p1 p2 k3)")
 
 
-def build_config(calib_path: Path, pcd_dir: Path, cameras: dict[str, str]) -> dict:
+def build_config(calib_path: Path, pcd_dir: Path, cameras: dict[str, str],
+                 task_ids: list[int] | None = None) -> dict:
     raw = calib_path.read_bytes()
     try:
         calib = json.loads(raw)
@@ -83,12 +84,50 @@ def build_config(calib_path: Path, pcd_dir: Path, cameras: dict[str, str]) -> di
         raise ConfigError("no context image is mapped to a camera")
     check_calibration(calib, cameras)
     frames = read_frames_from_pcd(pcd_dir)
-    return {
+    entry = {
         "calibration_version": {"file": calib_path.name, "sha256": hashlib.sha256(raw).hexdigest()},
         "frames": frames,
         "cameras": cameras,
         "calibration": calib,
     }
+    if task_ids:
+        entry["task_ids"] = sorted(set(task_ids))
+    return entry
+
+
+def as_datasets(existing: object) -> list[dict]:
+    """Normalise a loaded config (registry, single flat entry, or empty) to a datasets list."""
+    if isinstance(existing, dict) and isinstance(existing.get("datasets"), list):
+        return [d for d in existing["datasets"] if isinstance(d, dict) and d.get("calibration")]
+    if isinstance(existing, dict) and existing.get("calibration"):
+        return [existing]
+    return []
+
+
+def merge_entry(existing: object, entry: dict) -> dict:
+    """Merge one dataset entry into a registry. Same recording (same calibration sha + same
+    panel set) folds its task ids into the new entry instead of duplicating; a task id that
+    moves to a different calibration is taken from its old entry; a plain re-`up` without task
+    ids replaces the entry with the same panel set."""
+    new_tasks = set(entry.get("task_ids", []))
+    new_panels = frozenset(entry["cameras"].keys())
+    new_sha = (entry.get("calibration_version") or {}).get("sha256")
+    kept = []
+    for d in as_datasets(existing):
+        d_tasks = set(d.get("task_ids", []))
+        d_panels = frozenset((d.get("cameras") or {}).keys())
+        d_sha = (d.get("calibration_version") or {}).get("sha256")
+        if new_sha and d_sha == new_sha and d_panels == new_panels:
+            new_tasks |= d_tasks          # same recording: fold tasks, drop the duplicate
+            continue
+        if new_tasks and (new_tasks & d_tasks):
+            continue                       # these tasks now use the new calibration
+        if not new_tasks and d_panels == new_panels:
+            continue                       # manual re-up without task ids: replace by panels
+        kept.append(d)
+    if new_tasks:
+        entry["task_ids"] = sorted(new_tasks)
+    return {"datasets": kept + [entry]}
 
 
 def block_end(conf: str, open_brace: int) -> int | None:
@@ -136,29 +175,58 @@ def write_private(path: Path, text: str) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
+    def add_build_args(p):
+        p.add_argument("--calib", type=Path, required=True)
+        p.add_argument("--pcd-dir", type=Path, required=True,
+                       help="directory with .pcd files (frame stems)")
+        p.add_argument("--cameras", default=json.dumps(DEFAULT_CAMERAS),
+                       help='JSON: context image -> calibrated camera, default %(default)s')
+        p.add_argument("--task-ids", default="",
+                       help="comma-separated CVAT task ids this calibration belongs to")
+        p.add_argument("--out", type=Path, required=True)
+
     c = sub.add_parser("config")
-    c.add_argument("--calib", type=Path, required=True)
-    c.add_argument("--pcd-dir", type=Path, required=True,
-                   help="directory with .pcd files (frame stems)")
-    c.add_argument("--cameras", default=json.dumps(DEFAULT_CAMERAS),
-                   help='JSON: context image -> calibrated camera, default %(default)s')
-    c.add_argument("--out", type=Path, required=True)
+    add_build_args(c)
+    r = sub.add_parser("register")  # merge one dataset into an existing registry
+    add_build_args(r)
+    r.add_argument("--existing", type=Path, help="current config.json to merge into (optional)")
     n = sub.add_parser("nginx")
     n.add_argument("--stock", type=Path, required=True)
     n.add_argument("--out", type=Path, required=True)
     a = parser.parse_args(argv)
+
+    def parse_cameras(s):
+        try:
+            cameras = json.loads(s)
+        except ValueError:
+            raise ConfigError(f"--cameras is not JSON: {s!r}") from None
+        if not isinstance(cameras, dict) or not all(isinstance(v, str) for v in cameras.values()):
+            raise ConfigError('--cameras must map context images to camera names')
+        return cameras
+
+    def parse_task_ids(s):
+        try:
+            return [int(x) for x in s.split(",") if x.strip()]
+        except ValueError:
+            raise ConfigError(f"--task-ids must be comma-separated integers: {s!r}") from None
+
     try:
-        if a.cmd == "config":
-            try:
-                cameras = json.loads(a.cameras)
-            except ValueError:
-                raise ConfigError(f"--cameras is not JSON: {a.cameras!r}") from None
-            if not isinstance(cameras, dict) or not all(isinstance(v, str) for v in cameras.values()):
-                raise ConfigError('--cameras must map context images to camera names')
-            cfg = build_config(a.calib, a.pcd_dir, cameras)
-            write_private(a.out, json.dumps(cfg))
-            v = cfg["calibration_version"]
-            print(f"config: {len(cfg['frames'])} frames, cameras {cfg['cameras']}, "
+        if a.cmd in ("config", "register"):
+            entry = build_config(a.calib, a.pcd_dir, parse_cameras(a.cameras), parse_task_ids(a.task_ids))
+            if a.cmd == "register":
+                existing = {}
+                if a.existing and a.existing.exists() and a.existing.stat().st_size:
+                    try:
+                        existing = json.loads(a.existing.read_text())
+                    except ValueError:
+                        existing = {}
+                out = merge_entry(existing, entry)
+            else:
+                out = {"datasets": [entry]}
+            write_private(a.out, json.dumps(out))
+            v = entry["calibration_version"]
+            print(f"{a.cmd}: {len(out['datasets'])} dataset(s); this one {len(entry['frames'])} frames, "
+                  f"cameras {entry['cameras']}, tasks {entry.get('task_ids', [])}, "
                   f"calibration {v['file']} sha256 {v['sha256'][:12]}")
         else:
             a.out.write_text(build_nginx(a.stock.read_text(), LOCATIONS.read_text()))

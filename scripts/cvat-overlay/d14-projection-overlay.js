@@ -282,6 +282,26 @@
     let last = { job: null, frame: null, states: null };
     let redrawQueued = false;
 
+    // Normalise either the registry form {datasets:[...]} or a single flat config
+    // {calibration, cameras, frames, calibration_version} (wrapped as one dataset), so one
+    // CVAT instance can serve several recordings (e.g. data_day14 and nuScenes) at once.
+    function normalizeConfig(cfg) {
+        const list = Array.isArray(cfg.datasets) ? cfg.datasets : [cfg];
+        const datasets = list.filter((d) => d && d.calibration && d.cameras).map((d) => {
+            const v = d.calibration_version || {};
+            const version = v.sha256 ? `${v.file} ${v.sha256.slice(0, 8)}` : 'unversioned';
+            return {
+                calibration: d.calibration,
+                cameras: d.cameras,
+                version,
+                frameSet: new Set(d.frames || []),
+                taskIds: new Set((d.task_ids || []).map(Number)),
+            };
+        });
+        console.info(LOG, `loaded ${datasets.length} dataset(s)`);
+        return { datasets };
+    }
+
     function loadConfig() {
         if (!configPromise) {
             configPromise = fetch(CONFIG_URL, { credentials: 'same-origin', cache: 'no-store' })
@@ -289,12 +309,7 @@
                     if (!r.ok) throw new Error(`config HTTP ${r.status}`);
                     return r.json();
                 })
-                .then((cfg) => {
-                    const v = cfg.calibration_version || {};
-                    const version = v.sha256 ? `${v.file} ${v.sha256.slice(0, 8)}` : 'unversioned';
-                    console.info(LOG, `calibration ${version}, ${(cfg.frames || []).length} frames`);
-                    return { ...cfg, version, frameSet: new Set(cfg.frames || []) };
-                })
+                .then(normalizeConfig)
                 .catch((e) => {
                     console.warn(LOG, 'disabled:', e.message);
                     configPromise = null; // retry on next use (e.g. after login)
@@ -348,14 +363,22 @@
         return item ? item.name.replace(/^.*\//, '').replace(/\.[^.]*$/, '') : null;
     }
 
-    // The calibration belongs to one recording, so draw only on frames whose point cloud is one
-    // of its files, whatever the task is called or numbered on this CVAT.
-    async function configFor(job, frame) {
+    // Point-cloud stem for a job frame, or null if the job/frame is unsupported.
+    async function stemFor(job, frame) {
         if (!job || job.dimension !== '3d') return null;
-        const cfg = await loadConfig();
-        if (!cfg) return null;
         const meta = await jobMeta(job);
-        return meta && cfg.frameSet.has(frameStem(meta, job, frame)) ? cfg : null;
+        return meta ? frameStem(meta, job, frame) : null;
+    }
+
+    // Pick {calibration, camera, version} for one panel of one frame, across every dataset:
+    // the dataset that calibrates this panel name AND owns this point-cloud frame. A panel name
+    // reused by overlapping recordings is disambiguated by task id (set when the task registers).
+    function resolvePanel(cfg, panelKey, stem, taskId) {
+        if (!cfg || !panelKey || stem == null) return null;
+        const hits = cfg.datasets.filter((d) => d.cameras[panelKey] && d.frameSet.has(stem));
+        if (!hits.length) return null;
+        const d = (taskId != null && hits.find((x) => x.taskIds.has(Number(taskId)))) || hits[0];
+        return { calibration: d.calibration, camera: d.cameras[panelKey], version: d.version };
     }
 
     function boxesFromStates(states) {
@@ -371,7 +394,7 @@
     }
 
     // Which calibration drew the boxes, so a screenshot names the file it came from.
-    function drawVersion(ctx, cfg, width, height) {
+    function drawVersion(ctx, version, width, height) {
         const size = Math.max(10, Math.round(width / 90));
         ctx.save();
         ctx.font = `${size}px monospace`;
@@ -379,35 +402,36 @@
         ctx.lineWidth = Math.max(2, size / 4);
         ctx.strokeStyle = 'rgba(0,0,0,0.8)';
         ctx.fillStyle = 'rgba(255,255,255,0.9)';
-        ctx.strokeText(`calib ${cfg.version}`, size / 2, height - size / 2);
-        ctx.fillText(`calib ${cfg.version}`, size / 2, height - size / 2);
+        ctx.strokeText(`calib ${version}`, size / 2, height - size / 2);
+        ctx.fillText(`calib ${version}`, size / 2, height - size / 2);
         ctx.restore();
     }
 
-    function paint(ctx, clean, states, cfg, camera) {
+    // sel = {calibration, camera, version} resolved for this panel+frame.
+    function paint(ctx, clean, states, sel) {
         ctx.drawImage(clean, 0, 0);
-        const [W, H] = cfg.calibration.cameras[camera].image_size;
+        const [W, H] = sel.calibration.cameras[sel.camera].image_size;
         if (clean.width !== W || clean.height !== H) {
             // wrong-size media must not get a silently rescaled overlay
             ctx.fillStyle = 'rgba(200,0,0,0.85)';
             ctx.font = `bold ${Math.round(clean.width / 40)}px sans-serif`;
             ctx.fillText(`overlay off: image ${clean.width}x${clean.height} != calib ${W}x${H}`, 10, clean.height / 10);
-            drawVersion(ctx, cfg, clean.width, clean.height);
+            drawVersion(ctx, sel.version, clean.width, clean.height);
             return;
         }
         // far to near, so nearer boxes stay on top; the frame fetch and the same-frame
         // repaint receive states in different orders and must still paint identical pixels
-        const items = boxesFromStates(states).map((b) => projectBox(b, cfg.calibration, camera)).filter(Boolean)
+        const items = boxesFromStates(states).map((b) => projectBox(b, sel.calibration, sel.camera)).filter(Boolean)
             .sort((a, b) => b.depth - a.depth || a.id - b.id);
         drawProjected(ctx, items, W);
-        drawVersion(ctx, cfg, W, H);
+        drawVersion(ctx, sel.version, W, H);
     }
 
     // The frame fetch and the same-frame repaint both rasterise here: drawing straight onto
     // the panel canvas antialiases differently, so the two paths would not match pixel for pixel.
-    function overlayBitmap(clean, states, cfg, camera) {
+    function overlayBitmap(clean, states, sel) {
         const canvas = new OffscreenCanvas(clean.width, clean.height);
-        paint(canvas.getContext('2d'), clean, states, cfg, camera);
+        paint(canvas.getContext('2d'), clean, states, sel);
         return createImageBitmap(canvas);
     }
 
@@ -415,15 +439,22 @@
     async function contextImageLeave(plugin, result, frameId) {
         try {
             const job = this;
-            const cfg = await configFor(job, frameId);
-            if (!cfg || !result) return result;
+            if (!result) return result;
+            const cfg = await loadConfig();
+            const stem = await stemFor(job, frameId);
+            if (!cfg || stem == null) return result;
+            const sels = {};
+            for (const key of Object.keys(result)) {
+                const sel = resolvePanel(cfg, key, stem, job.taskId);
+                if (sel && result[key]) sels[key] = sel;
+            }
+            if (!Object.keys(sels).length) return result;
             const states = await job.annotations.get(frameId, false, []);
             const out = { ...result };
-            for (const [key, camera] of Object.entries(cfg.cameras)) {
+            for (const [key, sel] of Object.entries(sels)) {
                 const clean = result[key];
-                if (!clean) continue;
                 remember(cleanBitmaps, `${job.id}:${frameId}:${key}`, clean, CLEAN_LIMIT);
-                out[key] = await overlayBitmap(clean, states, cfg, camera);
+                out[key] = await overlayBitmap(clean, states, sel);
             }
             return out;
         } catch (e) {
@@ -439,17 +470,18 @@
         redrawQueued = false;
         const snapshot = last;
         const { job, frame, states } = snapshot;
-        const cfg = await configFor(job, frame);
-        if (!cfg) return;
+        const cfg = await loadConfig();
+        const stem = await stemFor(job, frame);
+        if (!cfg || stem == null) return;
         for (const wrapper of document.querySelectorAll('.cvat-context-image-wrapper')) {
             const title = wrapper.querySelector('.cvat-context-image-title');
             const canvas = wrapper.querySelector('canvas');
             const key = title && title.textContent.trim();
-            const camera = key && cfg.cameras[key];
-            const clean = camera && cleanBitmaps.get(`${job.id}:${frame}:${key}`);
+            const sel = resolvePanel(cfg, key, stem, job.taskId);
+            const clean = sel && cleanBitmaps.get(`${job.id}:${frame}:${key}`);
             if (!canvas || !clean || canvas.width !== clean.width || canvas.height !== clean.height) continue;
             try {
-                const bitmap = await overlayBitmap(clean, states, cfg, camera);
+                const bitmap = await overlayBitmap(clean, states, sel);
                 // newer state, frame or camera arrived meanwhile: that change queued its own redraw
                 if (last === snapshot && title.textContent.trim() === key) canvas.getContext('2d').drawImage(bitmap, 0, 0);
                 bitmap.close();

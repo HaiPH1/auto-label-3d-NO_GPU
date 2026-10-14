@@ -14,6 +14,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import tarfile
 import threading
 import uuid
 import zipfile
@@ -25,14 +26,17 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 HOME = os.path.expanduser("~")
 RUN_PY = os.path.join(HOME, "auto-label-3d", "run.py")
 VENV_PY = os.path.join(HOME, "venv", "bin", "python3")
+# venv riêng cho nuscenes-devkit (tách khỏi venv inference để không đụng numpy<2/spconv)
+INGEST_PY = os.environ.get("INGEST_PY", os.path.join(HOME, "venv_ingest", "bin", "python3"))
 JOBS_DIR = os.path.join(HOME, "autolabel_jobs")
 os.makedirs(JOBS_DIR, exist_ok=True)
 
-# CVAT nội bộ (IP tĩnh của VM — CVAT_HOST routing khớp IP này)
-PUBLIC_IP = os.environ.get("PUBLIC_IP", "34.87.125.249")
-CVAT_URL = f"http://{PUBLIC_IP}:8080"
+# CVAT nội bộ — cấu hình qua biến môi trường khi triển khai (xem .env.example).
+# PUBLIC_IP phải khớp CVAT_HOST routing; CVAT_PASS bắt buộc set khi chạy thật.
+PUBLIC_IP = os.environ.get("PUBLIC_IP", "localhost")
+CVAT_URL = os.environ.get("CVAT_URL", f"http://{PUBLIC_IP}:8080")
 CVAT_USER = os.environ.get("CVAT_USER", "admin")
-CVAT_PASS = os.environ.get("CVAT_PASS", "Cvat123456")
+CVAT_PASS = os.environ.get("CVAT_PASS", "")
 
 # Đăng nhập admin của portal — lưu ra file để đổi được lúc chạy + giữ qua restart
 ADMIN_FILE = os.path.join(HOME, ".autolabel_admin.json")
@@ -80,28 +84,151 @@ def find_data_dir(root):
     return None
 
 
+def _run_pipeline(job, data_dir, cvat_url, user, password, task_name, lf):
+    """Chạy run.py trên 1 data_dir, stream log, tự đăng ký overlay. Trả (returncode, task_url)."""
+    cmd = [VENV_PY, RUN_PY, "--url", cvat_url, "--user", user,
+           "--password", password, "--task-name", task_name, "--data", data_dir]
+    calib_path = os.path.join(data_dir, "calib.json")
+    if os.path.exists(calib_path):
+        cmd += ["--calibration", calib_path, "--overlay"]
+    task_url = None
+    proc = subprocess.Popen(cmd, cwd=os.path.dirname(RUN_PY),
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    for line in proc.stdout:
+        job["log"] += line
+        lf.write(line)
+        lf.flush()
+        m = re.search(r"https?://\S+/tasks/\d+/jobs/\d+", line)
+        if m:
+            task_url = m.group(0)
+            job["task_url"] = task_url
+    proc.wait()
+    if proc.returncode == 0 and os.path.exists(calib_path) and task_url:
+        try:
+            register_overlay(data_dir, calib_path, task_url, job)
+        except Exception as e:  # noqa: BLE001 — overlay không được ảnh hưởng job
+            job["log"] += f"\n[overlay] bỏ qua đăng ký: {e}\n"
+    return proc.returncode, task_url
+
+
 def run_job(job_id, data_dir, cvat_url, user, password, task_name):
     job = JOBS[job_id]
     logf = os.path.join(JOBS_DIR, job_id, "run.log")
-    cmd = [VENV_PY, RUN_PY, "--url", cvat_url, "--user", user,
-           "--password", password, "--task-name", task_name, "--data", data_dir]
     try:
         with open(logf, "w") as lf:
-            proc = subprocess.Popen(cmd, cwd=os.path.dirname(RUN_PY),
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, bufsize=1)
-            for line in proc.stdout:
-                job["log"] += line
-                lf.write(line)
-                lf.flush()
-                m = re.search(r"https?://\S+/tasks/\d+/jobs/\d+", line)
-                if m:
-                    job["task_url"] = m.group(0)
-            proc.wait()
-        job["status"] = "done" if proc.returncode == 0 else "error"
+            rc, _ = _run_pipeline(job, data_dir, cvat_url, user, password, task_name, lf)
+        job["status"] = "done" if rc == 0 else "error"
     except Exception as e:  # noqa: BLE001
         job["log"] += f"\n>>> LỖI backend: {e}\n"
         job["status"] = "error"
+
+
+NUSCENES_INGEST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nuscenes_ingest.py")
+
+
+def find_nuscenes_root(root):
+    """Thư mục chứa metadata nuScenes thô (v1.0-*/sample.json), hoặc None."""
+    for dirpath, dirnames, _ in os.walk(root):
+        for d in dirnames:
+            if d.startswith("v1.0-") and os.path.exists(os.path.join(dirpath, d, "sample.json")):
+                return dirpath
+    return None
+
+
+def run_nuscenes_job(job_id, dataroot, cvat_url, user, password, task_name, scene_filter):
+    """Ingest nuScenes thô: mỗi scene -> convert -> auto-label (1 task CVAT/scene)."""
+    job = JOBS[job_id]
+    logf = os.path.join(JOBS_DIR, job_id, "run.log")
+    data_base = os.path.join(JOBS_DIR, job_id, "data")
+    try:
+        lst = subprocess.run([INGEST_PY, "-I", NUSCENES_INGEST, "list", dataroot],
+                             cwd=os.path.dirname(RUN_PY), stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, timeout=1200)
+        scenes = [s.strip() for s in lst.stdout.splitlines()
+                  if s.strip() and not s.lstrip().startswith("[")]
+        if scene_filter:
+            want = {s.strip() for s in scene_filter.split(",") if s.strip()}
+            scenes = [s for s in scenes if s in want]
+        if not scenes:
+            job["log"] += f"\n[ingest] không có scene hợp lệ.\n{lst.stdout}\n"
+            job["status"] = "error"
+            return
+        job["log"] += f"[ingest] {len(scenes)} scene: {', '.join(scenes)}\n"
+        ok = 0
+        with open(logf, "w") as lf:
+            lf.write(job["log"])
+            lf.flush()
+            for sc in scenes:
+                job["log"] += f"\n===== Scene {sc}: convert nuScenes -> nội bộ =====\n"
+                lf.write(f"\n===== {sc} convert =====\n")
+                lf.flush()
+                sdir = os.path.join(data_base, sc)
+                conv = subprocess.run([INGEST_PY, "-I", NUSCENES_INGEST, "convert", dataroot, sc, sdir],
+                                      cwd=os.path.dirname(RUN_PY), stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT, text=True, timeout=3600)
+                job["log"] += conv.stdout
+                lf.write(conv.stdout)
+                lf.flush()
+                if conv.returncode != 0 or not os.path.isdir(os.path.join(sdir, "pointcloud")):
+                    job["log"] += f"[ingest] bỏ qua scene {sc} (convert lỗi)\n"
+                    continue
+                rc, _ = _run_pipeline(job, sdir, cvat_url, user, password, f"{task_name}_{sc}", lf)
+                if rc == 0:
+                    ok += 1
+        job["log"] += f"\n[ingest] hoàn tất {ok}/{len(scenes)} scene (GT ở mỗi data/<scene>/gt.json).\n"
+        job["status"] = "done" if ok else "error"
+    except Exception as e:  # noqa: BLE001
+        job["log"] += f"\n>>> LỖI ingest nuScenes: {e}\n"
+        job["status"] = "error"
+
+
+OVERLAY_SH = os.path.join(os.path.dirname(RUN_PY), "scripts", "cvat-overlay", "overlay.sh")
+
+
+def _overlay_cameras(data_dir, calib_path):
+    """Map tên panel CVAT -> tên camera trong calib. Mặc định: tên file ảnh == tên camera
+    (nuScenes: CAM_FRONT.jpg -> CAM_FRONT). Khác thì đọc overlay_cameras.json trong data."""
+    with open(calib_path) as f:
+        cam_names = set((json.load(f).get("cameras") or {}).keys())
+    mapping = {}
+    ctx = os.path.join(data_dir, "context_images")
+    if os.path.isdir(ctx):
+        for frame in sorted(os.listdir(ctx)):
+            fd = os.path.join(ctx, frame)
+            if not os.path.isdir(fd):
+                continue
+            for img in os.listdir(fd):
+                stem = os.path.splitext(img)[0]
+                if stem in cam_names:
+                    mapping[stem] = stem
+            break  # 1 frame đủ để biết tên panel
+    override = os.path.join(data_dir, "overlay_cameras.json")
+    if os.path.exists(override):
+        try:
+            with open(override) as f:
+                mapping.update(json.load(f))
+        except Exception:  # noqa: BLE001
+            pass
+    return mapping
+
+
+def register_overlay(data_dir, calib_path, task_url, job):
+    m = re.search(r"/tasks/(\d+)/", task_url)
+    if not m:
+        return
+    task_id = m.group(1)
+    cameras = _overlay_cameras(data_dir, calib_path)
+    if not cameras:
+        job["log"] += "\n[overlay] không suy ra được mapping camera, bỏ qua\n"
+        return
+    pcd_dir = os.path.join(data_dir, "pointcloud")
+    cmd = ["bash", OVERLAY_SH, "register",
+           "--calib", calib_path, "--pcd-dir", pcd_dir,
+           "--cameras", json.dumps(cameras), "--task-ids", task_id]
+    env = dict(os.environ, CVAT_URL=CVAT_URL)
+    r = subprocess.run(cmd, cwd=os.path.dirname(RUN_PY), env=env,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+    job["log"] += f"\n[overlay] đăng ký task {task_id} (cameras {list(cameras)}):\n{r.stdout}\n"
 
 
 # ---------------------------------------------------------------- evaluate ----
@@ -235,28 +362,49 @@ async def index(request: Request):
 @app.post("/jobs")
 def create_job(request: Request, task_name: str = Form(...),
                      cvat_url: str = Form(CVAT_URL), cvat_user: str = Form(CVAT_USER),
-                     cvat_pass: str = Form(CVAT_PASS), file: UploadFile = File(...)):
+                     cvat_pass: str = Form(CVAT_PASS), scene: str = Form(""),
+                     file: UploadFile = File(...)):
     if not authed(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     job_id = uuid.uuid4().hex[:8]
     jdir = os.path.join(JOBS_DIR, job_id)
     os.makedirs(jdir, exist_ok=True)
-    zip_path = os.path.join(jdir, "upload.zip")
-    with open(zip_path, "wb") as f:
+    up_path = os.path.join(jdir, "upload" + os.path.splitext(file.filename or "")[1].lower())
+    with open(up_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
-    extract_dir = os.path.join(jdir, "data")
+    raw_dir = os.path.join(jdir, "raw")  # nơi giải nén dữ liệu thô
     try:
-        with zipfile.ZipFile(zip_path) as z:
-            z.extractall(extract_dir)
-    except zipfile.BadZipFile:
-        return JSONResponse({"error": "File không phải .zip hợp lệ"}, status_code=400)
-    data_dir = find_data_dir(extract_dir)
-    if not data_dir:
-        return JSONResponse({"error": "Không tìm thấy 'pointcloud/' trong zip"}, status_code=400)
-    JOBS[job_id] = {"status": "running", "log": "", "task_url": None}
-    threading.Thread(target=run_job, args=(job_id, data_dir, cvat_url.rstrip("/"),
-                     cvat_user, cvat_pass, task_name), daemon=True).start()
-    return {"job_id": job_id}
+        if zipfile.is_zipfile(up_path):
+            with zipfile.ZipFile(up_path) as z:
+                z.extractall(raw_dir)
+        elif tarfile.is_tarfile(up_path):
+            with tarfile.open(up_path) as t:
+                t.extractall(raw_dir)  # noqa: S202 — dữ liệu người dùng tự đẩy
+        else:
+            return JSONResponse({"error": "File phải là .zip hoặc .tar/.tgz"}, status_code=400)
+    except (zipfile.BadZipFile, tarfile.TarError) as e:
+        return JSONResponse({"error": f"Giải nén lỗi: {e}"}, status_code=400)
+
+    cvat_url = cvat_url.rstrip("/")
+    # 1) Đã đúng format tool (có pointcloud/) -> chạy thẳng
+    data_dir = find_data_dir(raw_dir)
+    if data_dir:
+        JOBS[job_id] = {"status": "running", "log": "", "task_url": None}
+        threading.Thread(target=run_job, args=(job_id, data_dir, cvat_url,
+                         cvat_user, cvat_pass, task_name), daemon=True).start()
+        return {"job_id": job_id}
+    # 2) nuScenes thô -> adapter tự convert từng scene
+    ns_root = find_nuscenes_root(raw_dir)
+    if ns_root:
+        JOBS[job_id] = {"status": "running",
+                        "log": "[ingest] Phát hiện nuScenes thô — đang convert nội bộ...\n",
+                        "task_url": None}
+        threading.Thread(target=run_nuscenes_job, args=(job_id, ns_root, cvat_url,
+                         cvat_user, cvat_pass, task_name, scene), daemon=True).start()
+        return {"job_id": job_id, "nuscenes": True}
+    return JSONResponse(
+        {"error": "Không thấy 'pointcloud/' và cũng không phải nuScenes thô (thiếu v1.0-*/sample.json)"},
+        status_code=400)
 
 
 @app.get("/jobs/{job_id}")
@@ -323,7 +471,7 @@ def list_datasets():
         out.append({"id": "data_day14", "label": "data_day14 (mẫu)", "dir": base})
     try:
         for d in sorted(os.listdir(JOBS_DIR), reverse=True):
-            jd = os.path.join(JOBS_DIR, d, "data")
+            jd = os.path.join(JOBS_DIR, d)
             dd = find_data_dir(jd) if os.path.isdir(jd) else None
             if dd:
                 n = len([f for f in os.listdir(os.path.join(dd, "pointcloud")) if f.endswith(".pcd")])
@@ -341,7 +489,7 @@ def api_datasets(request: Request):
 
 
 @app.post("/api/evaluate")
-def api_evaluate(request: Request, gt: UploadFile = File(...),
+def api_evaluate(request: Request, gt: UploadFile = File(None),
                  data: UploadFile = File(None), dataset: str = Form(None)):
     if not authed(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -367,9 +515,17 @@ def api_evaluate(request: Request, gt: UploadFile = File(...),
             return JSONResponse({"error": "Không thấy pointcloud/ trong data.zip"}, status_code=400)
     else:
         return JSONResponse({"error": "Chọn dataset có sẵn hoặc upload data"}, status_code=400)
-    gt_raw = os.path.join(jdir, "gt_raw")
-    with open(gt_raw, "wb") as f:
-        shutil.copyfileobj(gt.file, f)
+    if gt is not None and gt.filename:
+        gt_raw = os.path.join(jdir, "gt_raw")
+        with open(gt_raw, "wb") as f:
+            shutil.copyfileobj(gt.file, f)
+    else:
+        # Không upload GT -> dùng gt.json có sẵn của dataset (vd data nuScenes đã ingest)
+        gt_raw = os.path.join(data_dir, "gt.json")
+        if not os.path.exists(gt_raw):
+            return JSONResponse(
+                {"error": "Chưa có GT: upload file GT, hoặc chọn dataset đã có sẵn gt.json"},
+                status_code=400)
     try:
         conv = gt_to_pred_format(load_gt_file(gt_raw))
     except Exception as e:  # noqa: BLE001
@@ -588,7 +744,7 @@ details summary{cursor:pointer;color:var(--cyan);font-size:.85rem;margin-top:8px
      <details><summary>Tùy chọn CVAT (mặc định: server này)</summary>
        <label>CVAT URL</label><input name=cvat_url>
        <div class=row2><div><label>User</label><input name=cvat_user value=admin></div>
-       <div><label>Password</label><input name=cvat_pass type=password value=Cvat123456></div></div>
+       <div><label>Password</label><input name=cvat_pass type=password placeholder="mật khẩu CVAT"></div></div>
      </details>
      <div style=margin-top:18px><button class=btn id=btn>Bắt đầu auto-label</button></div>
     </form>

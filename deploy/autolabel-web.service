@@ -5,6 +5,7 @@ After=network.target
 [Service]
 User=phamhaisen
 WorkingDirectory=/home/phamhaisen/auto-label-3d/webapp
+EnvironmentFile=-/home/phamhaisen/auto-label-3d/webapp/.env
 ExecStart=/home/phamhaisen/venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=3

@@ -56,34 +56,32 @@ reload_or_restore() {
   nginx_ok -s reload || die "nginx reload failed in $UI"
 }
 
-up() {
-  local calib="" pcd_dir="" cameras=""
-  shift  # skip "up"
+# parse --calib/--pcd-dir/--cameras/--task-ids into globals A_CALIB/A_PCD/A_CAMERAS/A_TASKS
+parse_build_args() {
+  A_CALIB=""; A_PCD=""; A_CAMERAS=""; A_TASKS=""
+  shift  # skip subcommand
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --calib)   calib="$2"; shift 2 ;;
-      --pcd-dir) pcd_dir="$2"; shift 2 ;;
-      --cameras) cameras="$2"; shift 2 ;;
+      --calib)    A_CALIB="$2"; shift 2 ;;
+      --pcd-dir)  A_PCD="$2"; shift 2 ;;
+      --cameras)  A_CAMERAS="$2"; shift 2 ;;
+      --task-ids) A_TASKS="$2"; shift 2 ;;
       *) die "unknown flag: $1" ;;
     esac
   done
-  [ -n "$calib" ] || die "usage: $0 up --calib <calib.json> --pcd-dir <pointcloud/>"
-  [ -n "$pcd_dir" ] || die "usage: $0 up --calib <calib.json> --pcd-dir <pointcloud/>"
+  [ -n "$A_CALIB" ] || die "usage: $0 <up|register> --calib <calib.json> --pcd-dir <pointcloud/> [--cameras <json>] [--task-ids <id,..>]"
+  [ -n "$A_PCD" ] || die "usage: $0 <up|register> --calib <calib.json> --pcd-dir <pointcloud/> [--cameras <json>] [--task-ids <id,..>]"
+}
 
-  preflight
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
-
-  python3 "$HERE/overlay-config.py" config \
-    --calib "$calib" --pcd-dir "$pcd_dir" \
-    ${cameras:+--cameras "$cameras"} --out "$tmp/config.json"
-
+# install plugin JS + nginx hook + the given config.json into cvat_ui (idempotent)
+install_plugin() {
+  local config_file="$1"
   stock_conf >"$tmp/stock.conf"
   python3 "$HERE/overlay-config.py" nginx --stock "$tmp/stock.conf" --out "$tmp/default.conf"
 
   ui_root mkdir -p "$WWW" "$PRIVATE"
   docker cp "$HERE/d14-projection-overlay.js" "$UI:$WWW/d14-projection-overlay.js"
-  docker cp "$tmp/config.json" "$UI:$PRIVATE/config.json"
+  docker cp "$config_file" "$UI:$PRIVATE/config.json"
   docker cp "$tmp/default.conf" "$UI:$CONF"
   ui_root chown -R nginx:nginx "$WWW" "$PRIVATE" "$CONF"
   ui_root chmod 755 "$WWW"
@@ -91,9 +89,36 @@ up() {
   ui_root chmod 700 "$PRIVATE"
   ui_root chmod 600 "$PRIVATE/config.json"
   reload_or_restore
+}
+
+up() {
+  parse_build_args "$@"
+  preflight
+  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+  python3 "$HERE/overlay-config.py" config \
+    --calib "$A_CALIB" --pcd-dir "$A_PCD" \
+    ${A_CAMERAS:+--cameras "$A_CAMERAS"} ${A_TASKS:+--task-ids "$A_TASKS"} \
+    --out "$tmp/config.json"
+  install_plugin "$tmp/config.json"
   sleep 1
   status
   echo "→ reload the CVAT tab (Ctrl+Shift+R) to load the plugin"
+}
+
+# merge one dataset into the live registry, keeping the others (used per task)
+register() {
+  parse_build_args "$@"
+  preflight
+  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+  # current registry from the container (empty if none / plugin not yet installed)
+  ui cat "$PRIVATE/config.json" >"$tmp/existing.json" 2>/dev/null || : >"$tmp/existing.json"
+  python3 "$HERE/overlay-config.py" register \
+    --calib "$A_CALIB" --pcd-dir "$A_PCD" \
+    ${A_CAMERAS:+--cameras "$A_CAMERAS"} ${A_TASKS:+--task-ids "$A_TASKS"} \
+    --existing "$tmp/existing.json" --out "$tmp/config.json"
+  install_plugin "$tmp/config.json"
+  sleep 1
+  status
 }
 
 down() {
@@ -124,15 +149,22 @@ except ValueError: print("unreachable")' <<<"$about")"
   echo "  plugin: HTTP $(code /d14-overlay/d14-projection-overlay.js) (expect 200)"
   echo "  config: HTTP $(code /d14-overlay/private/config.json) (expect 401 without login)"
   ui cat "$PRIVATE/config.json" 2>/dev/null | python3 -c 'import json, sys
-c = json.load(sys.stdin); v = c["calibration_version"]
-print("  calibration: %s sha256 %s, %d frames, cameras %s"
-      % (v["file"], v["sha256"][:12], len(c["frames"]), c["cameras"]))' \
+c = json.load(sys.stdin)
+ds = c["datasets"] if isinstance(c, dict) and isinstance(c.get("datasets"), list) else [c]
+print("  datasets: %d" % len(ds))
+for d in ds:
+    v = d.get("calibration_version", {})
+    print("    - %s sha256 %s, %d frames, tasks %s, cameras %s"
+          % (v.get("file", "?"), str(v.get("sha256", ""))[:12], len(d.get("frames", [])),
+             d.get("task_ids", []), list((d.get("cameras") or {}).keys())))' \
     || echo "  calibration: config missing in $UI"
 }
 
 case "${1:-}" in
   up) up "$@" ;;
+  register) register "$@" ;;
   down) down ;;
   status) status ;;
-  *) echo "usage: $0 up --calib <calib.json> --pcd-dir <pointcloud/>"; echo "       $0 down|status"; exit 1 ;;
+  *) echo "usage: $0 up|register --calib <calib.json> --pcd-dir <pointcloud/> [--cameras <json>] [--task-ids <id,..>]"
+     echo "       $0 down|status"; exit 1 ;;
 esac
