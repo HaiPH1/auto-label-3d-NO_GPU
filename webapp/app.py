@@ -356,7 +356,7 @@ async def login_page(request: Request):
 async def index(request: Request):
     if not authed(request):
         return RedirectResponse("/login")
-    return APP_HTML
+    return HTMLResponse(APP_HTML, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/jobs")
@@ -462,6 +462,41 @@ def api_team(request: Request):
         return {"ok": True, "rows": rows}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/unassign")
+def api_unassign(request: Request, username: str = Form(...), task_id: int = Form(0)):
+    """Gỡ giao: xoá assignee các job đang gán cho `username`
+    (giới hạn trong task_id nếu > 0)."""
+    if not authed(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    username = username.strip()
+    if not username:
+        return JSONResponse({"error": "Thiếu username"}, status_code=400)
+    try:
+        tok = cvat_token()
+        jobs, page = [], 1
+        while True:
+            params = {"page": page, "page_size": 100}
+            if task_id:
+                params["task_id"] = task_id
+            r = cvat_get("/api/jobs", tok, **params)
+            jobs += r.get("results", [])
+            if not r.get("next"):
+                break
+            page += 1
+        freed = 0
+        for j in jobs:
+            a = j.get("assignee") or {}
+            if a.get("username") == username:
+                rr = requests.patch(f"{CVAT_URL}/api/jobs/{j['id']}",
+                                    headers={"Authorization": f"Token {tok}"},
+                                    json={"assignee": None}, timeout=10)
+                if rr.status_code == 200:
+                    freed += 1
+        return {"ok": True, "count": freed, "user": username}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 def list_datasets():
@@ -618,36 +653,194 @@ CVAT_DIR = os.path.join(HOME, "cvat")
 _SAFE_USER = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
-def create_cvat_users(names, password):
-    """Tạo tài khoản annotator trong CVAT qua Django shell (active ngay)."""
+def _cvat_shell(script, timeout=150):
+    """Chạy 1 đoạn Python trong container cvat_server qua manage.py shell."""
+    cmd = ["sudo", "docker", "compose", "exec", "-T", "cvat_server",
+           "python3", "/home/django/manage.py", "shell", "-c", script]
+    r = subprocess.run(cmd, cwd=CVAT_DIR, capture_output=True, text=True, timeout=timeout)
+    return ((r.stdout or "") + (r.stderr or "")).strip()
+
+
+def create_cvat_users(entries, password):
+    """Tạo tài khoản trong CVAT. entries: list [username, fullname]. Active ngay."""
+    script = (
+        "from django.contrib.auth import get_user_model\n"
+        "U=get_user_model()\n"
+        f"for n,fn in {json.dumps(entries)}:\n"
+        "    u,c=U.objects.get_or_create(username=n, defaults={'email':n+'@local'})\n"
+        "    if fn: u.first_name=fn[:150]\n"
+        f"    u.set_password({json.dumps(password)}); u.is_active=True; u.save()\n"
+        "    print(n, 'created' if c else 'exists')\n"
+    )
+    return _cvat_shell(script)
+
+
+def list_cvat_users():
+    """Danh sách user CVAT: username, quyền, tên, lần đăng nhập cuối."""
+    script = (
+        "import json\n"
+        "from django.contrib.auth import get_user_model\n"
+        "U=get_user_model()\n"
+        "rows=[{'username':u.username,'name':(u.first_name or u.last_name or ''),"
+        "'is_super':u.is_superuser,'is_staff':u.is_staff,"
+        "'last_login':(u.last_login.strftime('%Y-%m-%d %H:%M') if u.last_login else None)} "
+        "for u in U.objects.order_by('id')]\n"
+        "print('J<'+json.dumps(rows)+'>J')\n"
+    )
+    out = _cvat_shell(script)
+    m = re.search(r'J<(.*)>J', out, re.S)
+    if not m:
+        raise RuntimeError(out[-400:] or "shell không trả dữ liệu")
+    return json.loads(m.group(1))
+
+
+def delete_cvat_users(names):
+    """Xoá user theo username. KHÔNG xoá superuser (admin)."""
     script = (
         "from django.contrib.auth import get_user_model\n"
         "U=get_user_model()\n"
         f"for n in {json.dumps(names)}:\n"
-        "    u,c=U.objects.get_or_create(username=n, defaults={'email':n+'@local'})\n"
-        f"    u.set_password({json.dumps(password)}); u.is_active=True; u.save()\n"
-        "    print(n, 'created' if c else 'exists')\n"
+        "    u=U.objects.filter(username=n).first()\n"
+        "    if not u: print(n,'notfound'); continue\n"
+        "    if u.is_superuser: print(n,'skip-admin'); continue\n"
+        "    u.delete(); print(n,'deleted')\n"
     )
-    cmd = ["sudo", "docker", "compose", "exec", "-T", "cvat_server",
-           "python3", "/home/django/manage.py", "shell", "-c", script]
-    r = subprocess.run(cmd, cwd=CVAT_DIR, capture_output=True, text=True, timeout=150)
-    return (r.stdout + r.stderr).strip()
+    return _cvat_shell(script)
+
+
+def _rows_to_entries(rows):
+    """[row[cell,...]] -> [[username, fullname]]. Tự dò cột mã & tên theo header,
+    hoặc đoán theo số cột nếu không có header."""
+    rows = [r for r in rows if any((c or "").strip() for c in r)]
+    if not rows:
+        raise ValueError("File rỗng")
+    id_col = name_col = None
+    hdr = [(c or "").strip().lower() for c in rows[0]]
+    for i, c in enumerate(hdr):
+        if id_col is None and re.search(r"mã|mssv|student|^id$|user", c):
+            id_col = i
+    for i, c in enumerate(hdr):
+        # 'tên'/'name' — tránh 'họ' vì khớp nhầm 'học' trong "Mã học viên"
+        if name_col is None and i != id_col and re.search(r"tên|name|fullname", c):
+            name_col = i
+    start = 1 if id_col is not None else 0
+    if id_col is None:  # không header -> đoán theo số cột
+        w = max(len(r) for r in rows)
+        if w >= 3:
+            id_col, name_col = 1, 2      # STT | Mã | Tên
+        elif w == 2:
+            id_col, name_col = 0, 1      # Mã | Tên
+        else:
+            id_col, name_col = 0, None   # chỉ Mã
+    out, seen = [], set()
+    for r in rows[start:]:
+        if id_col >= len(r):
+            continue
+        uid = (r[id_col] or "").strip()
+        if not uid or uid in seen:
+            continue
+        nm = (r[name_col].strip() if name_col is not None and name_col < len(r) else "")
+        seen.add(uid)
+        out.append([uid, nm])
+    if not out:
+        raise ValueError("Không thấy cột mã/username trong file")
+    return out
+
+
+def parse_account_file(raw: bytes, filename: str):
+    """Đọc .xlsx / .csv / .tsv / .txt -> [[username, fullname]]."""
+    name = (filename or "").lower()
+    rows = []
+    if name.endswith((".xlsx", ".xlsm")):
+        try:
+            import io
+            import openpyxl
+        except ImportError:
+            raise ValueError("Server chưa cài openpyxl — xuất file sang CSV rồi upload lại")
+        wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        for r in wb.active.iter_rows(values_only=True):
+            rows.append(["" if c is None else str(c) for c in r])
+    else:
+        import csv
+        import io
+        text = raw.decode("utf-8-sig", errors="replace")
+        sample = text[:4000]
+        delim = "\t" if sample.count("\t") > sample.count(",") else ","
+        for r in csv.reader(io.StringIO(text), delimiter=delim):
+            rows.append(r)
+    return _rows_to_entries(rows)
 
 
 @app.post("/api/accounts")
-def api_accounts(request: Request, usernames: str = Form(...),
+def api_accounts(request: Request, file: UploadFile = File(None),
+                 prefix: str = Form("annotator"), count: int = Form(0),
                  password: str = Form("Annotator123")):
     if not authed(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    names = [x.strip() for x in usernames.replace(",", "\n").splitlines() if x.strip()]
-    bad = [n for n in names if not _SAFE_USER.match(n)]
-    if bad:
-        return JSONResponse({"error": f"Username không hợp lệ (chỉ A-Z,0-9,_,.,-): {bad}"}, status_code=400)
-    if not names:
-        return JSONResponse({"error": "Chưa nhập tài khoản"}, status_code=400)
     try:
-        out = create_cvat_users(names, password)
-        return {"ok": True, "result": out}
+        if file is not None and file.filename:
+            entries = parse_account_file(file.file.read(), file.filename)
+        elif count and count > 0:
+            if count > 500:
+                return JSONResponse({"error": "Tối đa 500 tài khoản/lần"}, status_code=400)
+            if not _SAFE_USER.match(prefix):
+                return JSONResponse({"error": "Tiền tố chỉ gồm A-Z,0-9,_,.,-"}, status_code=400)
+            w = max(2, len(str(count)))
+            entries = [[f"{prefix}{i:0{w}d}", ""] for i in range(1, count + 1)]
+        else:
+            return JSONResponse({"error": "Upload file danh sách hoặc nhập số lượng"}, status_code=400)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    bad = [u for u, _ in entries if not _SAFE_USER.match(u)]
+    if bad:
+        return JSONResponse(
+            {"error": f"Mã/username không hợp lệ (chỉ A-Z,0-9,_,.,-): {bad[:5]}"}, status_code=400)
+    try:
+        out = create_cvat_users(entries, password)
+        accounts = [{"username": u, "name": fn, "password": password} for u, fn in entries]
+        return {"ok": True, "result": out, "count": len(entries), "accounts": accounts}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/accounts/list")
+def api_accounts_list(request: Request):
+    if not authed(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        return {"ok": True, "users": list_cvat_users()}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/accounts/delete")
+def api_accounts_delete(request: Request, usernames: str = Form(...)):
+    if not authed(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    names = [x.strip() for x in usernames.replace(",", "\n").splitlines() if x.strip()]
+    names = [n for n in names if _SAFE_USER.match(n)]
+    if not names:
+        return JSONResponse({"error": "Chưa chọn tài khoản hợp lệ"}, status_code=400)
+    try:
+        return {"ok": True, "result": delete_cvat_users(names)}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/tasks")
+def api_tasks(request: Request):
+    if not authed(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        tok = cvat_token()
+        out = []
+        for t in cvat_get("/api/tasks", tok, page_size=100).get("results", []):
+            jc = None
+            j = t.get("jobs")
+            if isinstance(j, dict):
+                jc = j.get("count")
+            out.append({"id": t["id"], "name": t.get("name", f"task {t['id']}"), "jobs": jc})
+        return {"ok": True, "tasks": out}
     except Exception as e:  # noqa: BLE001
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -682,6 +875,66 @@ def api_assign(request: Request, task_id: int = Form(...), usernames: str = Form
         return {"ok": True, "assigns": assigns, "task_url": f"{CVAT_URL}/tasks/{task_id}"}
     except Exception as e:  # noqa: BLE001
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+def _dir_size(path):
+    total = 0
+    for dp, _, fs in os.walk(path):
+        for f in fs:
+            try:
+                total += os.path.getsize(os.path.join(dp, f))
+            except OSError:
+                pass
+    return total
+
+
+@app.get("/api/server/usage")
+def api_server_usage(request: Request):
+    if not authed(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    du = shutil.disk_usage(HOME)
+    jobs = []
+    if os.path.isdir(JOBS_DIR):
+        for d in sorted(os.listdir(JOBS_DIR), reverse=True):
+            jd = os.path.join(JOBS_DIR, d)
+            if os.path.isdir(jd):
+                jobs.append({"id": d, "size_mb": round(_dir_size(jd) / 1e6, 1)})
+    tasks = []
+    try:
+        tok = cvat_token()
+        tasks = [{"id": t["id"], "name": t["name"]}
+                 for t in cvat_get("/api/tasks", tok, page_size=100).get("results", [])]
+    except Exception:  # noqa: BLE001
+        pass
+    return {"disk": {"free_gb": round(du.free / 1e9, 1), "total_gb": round(du.total / 1e9, 1)},
+            "jobs_total_mb": round(sum(j["size_mb"] for j in jobs), 1),
+            "jobs": jobs, "tasks": tasks}
+
+
+@app.post("/api/server/clean")
+def api_server_clean(request: Request, job_ids: str = Form(""), task_ids: str = Form("")):
+    if not authed(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    freed, del_jobs, del_tasks = 0, [], []
+    jobs_root = os.path.abspath(JOBS_DIR)
+    for jid in [x.strip() for x in job_ids.split(",") if x.strip()]:
+        jd = os.path.abspath(os.path.join(JOBS_DIR, os.path.basename(jid)))  # chống path traversal
+        if os.path.dirname(jd) == jobs_root and os.path.isdir(jd):
+            freed += _dir_size(jd)
+            shutil.rmtree(jd, ignore_errors=True)
+            del_jobs.append(os.path.basename(jd))
+    if task_ids.strip():
+        try:
+            tok = cvat_token()
+            for tid in [x.strip() for x in task_ids.split(",") if x.strip()]:
+                r = requests.delete(f"{CVAT_URL}/api/tasks/{int(tid)}",
+                                    headers={"Authorization": f"Token {tok}"}, timeout=15)
+                if r.status_code in (200, 202, 204):
+                    del_tasks.append(int(tid))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"error": f"Xóa task CVAT lỗi: {e}", "freed_mb": round(freed / 1e6, 1),
+                                 "jobs": del_jobs, "tasks": del_tasks}, status_code=500)
+    return {"ok": True, "freed_mb": round(freed / 1e6, 1), "jobs": del_jobs, "tasks": del_tasks}
 
 
 # -------------------------------------------------------------------- HTML -----
@@ -826,16 +1079,35 @@ details summary{cursor:pointer;color:var(--cyan);font-size:.85rem;margin-top:8px
   <section class=sec id=assign>
    <div class=card style=max-width:680px>
     <b>① Tạo tài khoản annotator</b>
-    <p class=muted style=font-size:.84rem>Tạo sẵn tài khoản trong CVAT để annotator đăng nhập (http://IP:8080) làm việc được giao.</p>
-    <label>Username (mỗi dòng 1, hoặc cách dấu phẩy)</label>
-    <textarea id=ac_users rows=4 style="width:100%;border-radius:10px;border:1px solid var(--line);background:#0b1223;color:var(--ink);padding:11px">annotator1
-annotator2</textarea>
-    <label>Mật khẩu mặc định (chung)</label><input id=ac_pass value="Annotator123">
-    <div style=margin-top:12px><button class=btn id=ac_btn>Tạo tài khoản</button></div>
+    <p class=muted style=font-size:.84rem>Cách 1: upload file danh sách (CSV/Excel có cột <b>Mã học viên</b> + <b>Họ và tên</b>) → mỗi mã thành 1 tài khoản. Cách 2: nhập số lượng để sinh tự động. Tạo xong tải được file .txt.</p>
+    <label>📄 File danh sách (.xlsx / .csv) — cột mã + tên</label>
+    <input type=file id=ac_file accept=".xlsx,.xlsm,.csv,.tsv,.txt">
+    <div class=muted style="text-align:center;margin:8px 0;font-size:.8rem">— hoặc —</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <div style=flex:2;min-width:150px><label>Tiền tố (nếu không dùng file)</label><input id=ac_prefix value="annotator"></div>
+      <div style=flex:1;min-width:90px><label>Số lượng</label><input id=ac_count type=number min=0 max=500 value=0></div>
+    </div>
+    <label>Mật khẩu chung (cho mọi tài khoản)</label><input id=ac_pass value="Annotator123">
+    <div style=margin-top:12px>
+      <button class=btn id=ac_btn>Tạo tài khoản</button>
+      <button class="btn ghost" id=ac_dl style="display:none;margin-left:8px">⬇ Tải danh sách (.txt)</button>
+    </div>
     <pre id=ac_result class=mono style="margin-top:10px;color:#aebdd8;font-size:.78rem;white-space:pre-wrap"></pre>
    </div>
    <div class=card style=max-width:680px;margin-top:14px>
-    <b>② Chia việc cho annotator</b>
+    <div style=display:flex;justify-content:space-between;align-items:center>
+     <b>② Quản lý tài khoản</b>
+     <span><button class="btn ghost" id=am_refresh style=padding:7px:12px>↻ Tải danh sách</button>
+     <button class="btn ghost" id=am_export style=padding:7px:12px>⬇ Export .txt</button></span>
+    </div>
+    <p class=muted style=font-size:.84rem>Tài khoản hiện có trong CVAT. Tick chọn rồi xoá (không xoá được admin).</p>
+    <table style=margin-top:10px><thead><tr><th style=width:30px><input type=checkbox id=am_all></th><th>Username</th><th>Họ tên</th><th>Quyền</th><th>Đăng nhập cuối</th></tr></thead>
+    <tbody id=am_body><tr><td colspan=5 class=muted>Bấm "Tải danh sách" để xem.</td></tr></tbody></table>
+    <div style=margin-top:12px><button class=btn id=am_del style="background:#b4273a;border-color:#b4273a">🗑 Xoá tài khoản đã chọn</button></div>
+    <pre id=am_result class=mono style="margin-top:10px;color:#aebdd8;font-size:.78rem;white-space:pre-wrap"></pre>
+   </div>
+   <div class=card style=max-width:680px;margin-top:14px>
+    <b>③ Chia việc cho annotator</b>
     <p class=muted style=font-size:.84rem>Nhập Task ID (task đã auto-label) + danh sách annotator → mỗi job gán 1 người luân phiên.</p>
     <label>Task ID</label><input id=as_task placeholder="vd: 15">
     <label>Annotator (mỗi dòng 1 username đã tạo)</label>
@@ -862,7 +1134,7 @@ annotator2</textarea>
     <label>1️⃣ Data point cloud — chọn data <b>có sẵn trên server</b> (nhanh) hoặc upload mới</label>
     <select id=ev_dataset></select>
     <div id=ev_dataup style="margin-top:8px;display:none"><input type=file id=ev_data accept=.zip></div>
-    <label>2️⃣ Ground truth — <b>Datumaro 3D</b> (.json hoặc .zip export từ CVAT), hoặc JSON của tool</label>
+    <label>2️⃣ Ground truth — <b>Datumaro 3D</b> (.json hoặc .zip export từ CVAT), hoặc JSON của tool<span class=muted id=ev_gt_hint></span></label>
     <input type=file id=ev_gt accept=".json,.zip">
     <div style=margin-top:16px><button class=btn id=ev_btn>Chạy đánh giá</button></div>
    </div>
@@ -930,14 +1202,70 @@ async function loadTeam(){const b=document.getElementById('team_body');b.innerHT
     <td><div class=bar><i style=width:${p}%></i></div><span class=muted style=font-size:.75rem>${p}%</span></td>
     <td class=muted>${(r.last||'').slice(0,16).replace('T',' ')}</td></tr>`}).join('');}
 document.getElementById('team_refresh').onclick=loadTeam;
-// tao tai khoan annotator
+// ===== tao tai khoan annotator (file hoac so luong) =====
+let _lastAcc=null;
+function loginURL(){return location.protocol+'//'+location.hostname+':8080';}
+function dlText(txt,fname){const b=new Blob([txt],{type:'text/plain;charset=utf-8'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=fname;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}
 document.getElementById('ac_btn').onclick=async()=>{
   const b=document.getElementById('ac_btn'), out=document.getElementById('ac_result');
-  const fd=new FormData();fd.append('usernames',document.getElementById('ac_users').value);fd.append('password',document.getElementById('ac_pass').value);
-  b.disabled=true;b.textContent='Đang tạo…';out.textContent='';
-  const j=await(await fetch('/api/accounts',{method:'POST',body:fd})).json();
+  const file=document.getElementById('ac_file').files[0];
+  const count=parseInt(document.getElementById('ac_count').value,10)||0;
+  const pass=document.getElementById('ac_pass').value;
+  if(!file && count<1){alert('Upload file danh sách hoặc nhập số lượng (>0)');return;}
+  const fd=new FormData();
+  if(file){fd.append('file',file);}else{fd.append('prefix',document.getElementById('ac_prefix').value||'annotator');fd.append('count',count);}
+  fd.append('password',pass);
+  b.disabled=true;b.textContent='Đang tạo…';out.textContent='';document.getElementById('ac_dl').style.display='none';
+  let j;try{j=await(await fetch('/api/accounts',{method:'POST',body:fd})).json();}catch(e){j={error:'lỗi mạng'};}
   b.disabled=false;b.textContent='Tạo tài khoản';
+  if(j.error){out.textContent='✕ Lỗi: '+j.error;return;}
+  out.textContent='✓ Tạo '+j.count+' tài khoản:\\n'+(j.result||'');
+  _lastAcc={accounts:j.accounts,url:loginURL()};
+  document.getElementById('ac_dl').style.display='';
+  loadAccounts();
+};
+document.getElementById('ac_dl').onclick=()=>{
+  if(!_lastAcc)return;
+  const now=new Date().toISOString().slice(0,16).replace('T',' ');
+  const head='# Tài khoản annotator — tạo '+now+'\\n# username | họ tên | mật khẩu | link đăng nhập\\n';
+  const lines=_lastAcc.accounts.map(a=>a.username+' | '+(a.name||'')+' | '+a.password+' | '+_lastAcc.url);
+  dlText(head+lines.join('\\n')+'\\n','tai_khoan_annotator.txt');
+};
+// ===== quan ly tai khoan =====
+let _accUsers=[];
+async function loadAccounts(){
+  const body=document.getElementById('am_body');body.innerHTML='<tr><td colspan=5 class=muted>Đang tải…</td></tr>';
+  let j;try{j=await(await fetch('/api/accounts/list')).json();}catch(e){j={error:'lỗi mạng'};}
+  if(!j.ok){body.innerHTML='<tr><td colspan=5 class=muted>Lỗi: '+(j.error||'')+'</td></tr>';return;}
+  _accUsers=j.users;
+  if(!_accUsers.length){body.innerHTML='<tr><td colspan=5 class=muted>Chưa có tài khoản.</td></tr>';return;}
+  body.innerHTML=_accUsers.map(u=>{
+    const role=u.is_super?'admin':(u.is_staff?'staff':'annotator');
+    const dis=u.is_super?'disabled title="không xoá admin"':'';
+    return '<tr><td><input type=checkbox class=am_ck value="'+u.username+'" '+dis+'></td><td>'+u.username+
+      '</td><td class=muted>'+(u.name||'')+'</td><td class=muted>'+role+'</td><td class=muted>'+(u.last_login||'chưa')+'</td></tr>';
+  }).join('');
+}
+document.getElementById('am_refresh').onclick=loadAccounts;
+document.getElementById('am_all').onclick=e=>{document.querySelectorAll('.am_ck:not([disabled])').forEach(c=>c.checked=e.target.checked);};
+document.getElementById('am_export').onclick=()=>{
+  if(!_accUsers.length){alert('Bấm "Tải danh sách" trước');return;}
+  const url=loginURL();
+  const head='# Danh sách tài khoản (mật khẩu: dùng mật khẩu chung đã đặt khi tạo)\\n# username | họ tên | link\\n';
+  const lines=_accUsers.filter(u=>!u.is_super).map(u=>u.username+' | '+(u.name||'')+' | '+url);
+  dlText(head+lines.join('\\n')+'\\n','danh_sach_tai_khoan.txt');
+};
+document.getElementById('am_del').onclick=async()=>{
+  const sel=[...document.querySelectorAll('.am_ck:checked')].map(c=>c.value);
+  if(!sel.length){alert('Chưa chọn tài khoản');return;}
+  if(!confirm('Xoá '+sel.length+' tài khoản? Không hoàn tác được.'))return;
+  const b=document.getElementById('am_del'),out=document.getElementById('am_result');
+  b.disabled=true;b.textContent='Đang xoá…';out.textContent='';
+  const fd=new FormData();fd.append('usernames',sel.join('\\n'));
+  let j;try{j=await(await fetch('/api/accounts/delete',{method:'POST',body:fd})).json();}catch(e){j={error:'lỗi mạng'};}
+  b.disabled=false;b.textContent='🗑 Xoá tài khoản đã chọn';
   out.textContent=j.error?('✕ Lỗi: '+j.error):('✓ Xong:\\n'+(j.result||''));
+  loadAccounts();
 };
 // phan cong job
 document.getElementById('as_btn').onclick=async()=>{
@@ -951,7 +1279,12 @@ document.getElementById('as_btn').onclick=async()=>{
 };
 // ===== Đánh giá =====
 const evBtn=document.getElementById('ev_btn'), evSel=document.getElementById('ev_dataset');
-function updDataup(){document.getElementById('ev_dataup').style.display=evSel.value?'none':'block';}
+function updDataup(){
+  document.getElementById('ev_dataup').style.display=evSel.value?'none':'block';
+  document.getElementById('ev_gt').value='';           // xoá GT của bộ trước khi đổi dataset
+  const h=document.getElementById('ev_gt_hint');
+  if(h)h.textContent=evSel.value?' (tùy chọn — bỏ trống sẽ dùng gt.json có sẵn của bộ này)':' (bắt buộc khi upload data mới)';
+}
 fetch('/api/datasets').then(r=>r.json()).then(d=>{
   const ds=d.datasets||[];
   evSel.innerHTML=ds.map(x=>`<option value="${x.id}">${x.label}</option>`).join('')+'<option value="">— Upload data mới —</option>';
@@ -960,10 +1293,16 @@ fetch('/api/datasets').then(r=>r.json()).then(d=>{
 evSel.onchange=updDataup;
 evBtn.onclick=()=>{
   const g=document.getElementById('ev_gt').files[0];
-  if(!g){alert('Chọn file Ground truth');return;}
-  const fd=new FormData();fd.append('gt',g);
-  if(evSel.value){fd.append('dataset',evSel.value);}
-  else{const d=document.getElementById('ev_data').files[0];if(!d){alert('Chọn data có sẵn hoặc upload data');return;}fd.append('data',d);}
+  const fd=new FormData();
+  if(evSel.value){
+    fd.append('dataset',evSel.value);
+    if(g)fd.append('gt',g);          // GT tùy chọn: bỏ trống -> backend dùng gt.json của bộ
+  }else{
+    const d=document.getElementById('ev_data').files[0];
+    if(!d){alert('Chọn data có sẵn hoặc upload data');return;}
+    if(!g){alert('Upload data mới cần kèm file Ground truth');return;}
+    fd.append('data',d);fd.append('gt',g);
+  }
   evBtn.disabled=true;evBtn.textContent='Đang chạy…';
   document.getElementById('ev_prog').classList.remove('hidden');document.getElementById('ev_result').innerHTML='';
   setBar('ev_p',0,'Chuẩn bị tải lên…',false);

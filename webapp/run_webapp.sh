@@ -2,7 +2,7 @@
 # Khởi động web portal trên VM (chạy nền). Chạy: bash run_webapp.sh
 set -e
 source "$HOME/venv/bin/activate"
-pip install -q fastapi "uvicorn[standard]" python-multipart
+pip install -q fastapi "uvicorn[standard]" python-multipart requests openpyxl
 cd "$HOME/auto-label-3d/webapp"
 # tắt tiến trình cũ nếu có
 pkill -f "uvicorn app:app" 2>/dev/null || true

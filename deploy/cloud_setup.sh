@@ -53,7 +53,7 @@ done
 log "[3/4] Copy code lên VM..."
 gcloud compute ssh "$VM_NAME" "${G[@]}" --command="mkdir -p ~/auto-label-3d"
 gcloud compute scp "$PROJECT_DIR"/*.py "$VM_NAME":~/auto-label-3d/ "${G[@]}"
-gcloud compute scp --recurse "$PROJECT_DIR/scripts" "$HERE" "$VM_NAME":~/auto-label-3d/ "${G[@]}"
+gcloud compute scp --recurse "$PROJECT_DIR/scripts" "$PROJECT_DIR/webapp" "$HERE" "$VM_NAME":~/auto-label-3d/ "${G[@]}"
 
 # ---- 4. Provision ------------------------------------------------------------
 log "[4/4] Cài CVAT + inference (10-20 phút)..."
