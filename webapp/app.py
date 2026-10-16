@@ -26,6 +26,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 HOME = os.path.expanduser("~")
 RUN_PY = os.path.join(HOME, "auto-label-3d", "run.py")
 VENV_PY = os.path.join(HOME, "venv", "bin", "python3")
+# Box calib riêng theo bộ: day14 co box theo domain; nuScenes KHÔNG calib (đã đúng size)
+BOX_CALIB_DAY14 = os.path.join(HOME, "box_calib_day14.json")
 # venv riêng cho nuscenes-devkit (tách khỏi venv inference để không đụng numpy<2/spconv)
 INGEST_PY = os.environ.get("INGEST_PY", os.path.join(HOME, "venv_ingest", "bin", "python3"))
 JOBS_DIR = os.path.join(HOME, "autolabel_jobs")
@@ -84,15 +86,19 @@ def find_data_dir(root):
     return None
 
 
-def _run_pipeline(job, data_dir, cvat_url, user, password, task_name, lf):
-    """Chạy run.py trên 1 data_dir, stream log, tự đăng ký overlay. Trả (returncode, task_url)."""
+def _run_pipeline(job, data_dir, cvat_url, user, password, task_name, lf, box_calib=None):
+    """Chạy run.py trên 1 data_dir, stream log, tự đăng ký overlay. Trả (returncode, task_url).
+    box_calib: "" = tắt hiệu chỉnh box; đường dẫn = dùng file đó; None = mặc định run.py."""
     cmd = [VENV_PY, RUN_PY, "--url", cvat_url, "--user", user,
            "--password", password, "--task-name", task_name, "--data", data_dir]
     calib_path = os.path.join(data_dir, "calib.json")
     if os.path.exists(calib_path):
         cmd += ["--calibration", calib_path, "--overlay"]
+    env = dict(os.environ)
+    if box_calib is not None:
+        env["BOX_CALIB"] = box_calib
     task_url = None
-    proc = subprocess.Popen(cmd, cwd=os.path.dirname(RUN_PY),
+    proc = subprocess.Popen(cmd, cwd=os.path.dirname(RUN_PY), env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     for line in proc.stdout:
         job["log"] += line
@@ -115,8 +121,10 @@ def run_job(job_id, data_dir, cvat_url, user, password, task_name):
     job = JOBS[job_id]
     logf = os.path.join(JOBS_DIR, job_id, "run.log")
     try:
+        # dir upload (vd data_day14): áp calib day14 nếu có
+        bc = BOX_CALIB_DAY14 if os.path.exists(BOX_CALIB_DAY14) else ""
         with open(logf, "w") as lf:
-            rc, _ = _run_pipeline(job, data_dir, cvat_url, user, password, task_name, lf)
+            rc, _ = _run_pipeline(job, data_dir, cvat_url, user, password, task_name, lf, box_calib=bc)
         job["status"] = "done" if rc == 0 else "error"
     except Exception as e:  # noqa: BLE001
         job["log"] += f"\n>>> LỖI backend: {e}\n"
@@ -172,7 +180,8 @@ def run_nuscenes_job(job_id, dataroot, cvat_url, user, password, task_name, scen
                 if conv.returncode != 0 or not os.path.isdir(os.path.join(sdir, "pointcloud")):
                     job["log"] += f"[ingest] bỏ qua scene {sc} (convert lỗi)\n"
                     continue
-                rc, _ = _run_pipeline(job, sdir, cvat_url, user, password, f"{task_name}_{sc}", lf)
+                # nuScenes đã đúng size (domain train) -> KHÔNG áp box calib
+                rc, _ = _run_pipeline(job, sdir, cvat_url, user, password, f"{task_name}_{sc}", lf, box_calib="")
                 if rc == 0:
                     ok += 1
         job["log"] += f"\n[ingest] hoàn tất {ok}/{len(scenes)} scene (GT ở mỗi data/<scene>/gt.json).\n"
