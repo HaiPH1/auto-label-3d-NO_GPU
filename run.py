@@ -76,6 +76,21 @@ THRESH_MAP = {
 
 HEADING_CLASSES = {'car', 'truck', 'bus', 'trailer', 'construction_vehicle', 'motorcycle'}
 
+# Ngưỡng IoU "giữ nguyên (không cần sửa)" THEO CLASS — 3D IoU gắt với vật nhỏ:
+# xe lớn giữ 0.7; người/cone/2-bánh nới 0.5 để phản ánh đúng công sửa thật.
+ACCEPT_IOU_BY_CLASS = {
+    'car': 0.7, 'truck': 0.7, 'bus': 0.7, 'trailer': 0.7, 'construction_vehicle': 0.7,
+    'pedestrian': 0.5, 'bicycle': 0.5, 'motorcycle': 0.5, 'traffic_cone': 0.5, 'barrier': 0.5,
+    '_default': 0.7,
+}
+
+
+def _accept_thr(cls, iou_accept):
+    """Ngưỡng accept cho 1 class: dict -> tra theo class (fallback _default); số -> dùng chung."""
+    if isinstance(iou_accept, dict):
+        return iou_accept.get(cls, iou_accept.get('_default', 0.7))
+    return iou_accept
+
 CLASS_COLORS = {
     'car': (0, 255, 0),
     'truck': (0, 165, 255),
@@ -1148,12 +1163,14 @@ def download_cvat_annotations(config):
     return result
 
 
-def evaluate_predictions(preds, gt, iou_accept=0.7, iou_edit=0.25):
+def evaluate_predictions(preds, gt, iou_accept=None, iou_edit=0.25):
     """Evaluate predictions against ground truth.
 
-    Returns dict with accept/edit/reject/miss counts, IoU stats, heading errors,
-    and per-class breakdown.
+    iou_accept: None -> ngưỡng theo class (ACCEPT_IOU_BY_CLASS); số -> chung mọi class;
+    dict -> tra theo class. Returns accept/edit/reject/miss, IoU stats, heading, per-class.
     """
+    if iou_accept is None:
+        iou_accept = ACCEPT_IOU_BY_CLASS
     pred_by_frame = {f['frame']: f['boxes'] for f in preds}
     gt_by_frame = {f['frame']: f['boxes'] for f in gt}
     all_frames = sorted(set(list(pred_by_frame.keys()) + list(gt_by_frame.keys())))
@@ -1181,6 +1198,7 @@ def evaluate_predictions(preds, gt, iou_accept=0.7, iou_edit=0.25):
                     'matched_ious': [], 'heading_errors': [],
                 }
             cs = stats['per_class'][cls]
+            acc_thr = _accept_thr(cls, iou_accept)
             stats['total_pred'] += len(p_cls)
             stats['total_gt'] += len(g_cls)
             cs['total_pred'] += len(p_cls)
@@ -1218,7 +1236,7 @@ def evaluate_predictions(preds, gt, iou_accept=0.7, iou_edit=0.25):
                 stats['heading_errors'].append(float(h_err))
                 cs['heading_errors'].append(float(h_err))
 
-                if iou_val >= iou_accept:
+                if iou_val >= acc_thr:
                     stats['accept'] += 1
                     cs['accept'] += 1
                 elif iou_val >= iou_edit:
@@ -1339,10 +1357,13 @@ def bias_report(preds, gt):
               f"{md(d['rl']):>6.2f}{md(d['rw']):>6.2f}{md(d['rh']):>6.2f}  {math.degrees(md(d['dyaw'])):>8.1f}")
 
 
-def print_evaluation_report(stats, iou_accept=0.7, iou_edit=0.25):
+def print_evaluation_report(stats, iou_accept=None, iou_edit=0.25):
     """Print formatted evaluation report."""
     total_gt = stats['total_gt']
     total_pred = stats['total_pred']
+    if iou_accept is None:
+        iou_accept = ACCEPT_IOU_BY_CLASS
+    acc_txt = "theo class (xe 0.7, vật nhỏ 0.5)" if isinstance(iou_accept, dict) else str(iou_accept)
 
     print("\n" + "=" * 65)
     print("  EVALUATION REPORT — Annotation Efficiency")
@@ -1350,7 +1371,7 @@ def print_evaluation_report(stats, iou_accept=0.7, iou_edit=0.25):
 
     print(f"\n  Predictions: {total_pred} boxes")
     print(f"  Ground Truth: {total_gt} boxes")
-    print(f"  IoU thresholds: Accept >= {iou_accept}, Edit >= {iou_edit}")
+    print(f"  IoU thresholds: Accept >= {acc_txt}, Edit >= {iou_edit}")
 
     denom = max(total_gt, 1)
     a_pct = stats['accept'] / denom * 100
@@ -1359,8 +1380,8 @@ def print_evaluation_report(stats, iou_accept=0.7, iou_edit=0.25):
     r_pct = stats['reject'] / max(total_pred, 1) * 100
 
     print(f"\n  --- Annotation Efficiency (vs GT) ---")
-    print(f"  Accept (IoU >= {iou_accept}):    {stats['accept']:>4d} / {total_gt}  = {a_pct:5.1f}%  -- giu nguyen")
-    print(f"  Edit ({iou_edit} <= IoU < {iou_accept}):  {stats['edit']:>4d} / {total_gt}  = {e_pct:5.1f}%  -- can sua")
+    print(f"  Accept (IoU >= {acc_txt}):    {stats['accept']:>4d} / {total_gt}  = {a_pct:5.1f}%  -- giu nguyen")
+    print(f"  Edit (IoU < accept):  {stats['edit']:>4d} / {total_gt}  = {e_pct:5.1f}%  -- can sua")
     print(f"  Miss (FN):              {stats['miss']:>4d} / {total_gt}  = {m_pct:5.1f}%  -- bi sot")
     print(f"  Reject (FP):            {stats['reject']:>4d} / {total_pred}  = {r_pct:5.1f}%  -- can xoa")
 
