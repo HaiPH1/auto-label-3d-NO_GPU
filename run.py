@@ -1163,14 +1163,13 @@ def download_cvat_annotations(config):
     return result
 
 
-def evaluate_predictions(preds, gt, iou_accept=None, iou_edit=0.25):
+def evaluate_predictions(preds, gt, iou_accept=0.7, iou_edit=0.25):
     """Evaluate predictions against ground truth.
 
-    iou_accept: None -> ngưỡng theo class (ACCEPT_IOU_BY_CLASS); số -> chung mọi class;
-    dict -> tra theo class. Returns accept/edit/reject/miss, IoU stats, heading, per-class.
+    iou_accept MẶC ĐỊNH 0.7 NGHIÊM (trung thực, không nới cho đẹp). Có thể truyền
+    số khác, hoặc dict theo class CHỈ KHI đã chốt chuẩn nghiệm thu với khách.
+    Returns accept/edit/reject/miss, IoU stats, heading, per-class.
     """
-    if iou_accept is None:
-        iou_accept = ACCEPT_IOU_BY_CLASS
     pred_by_frame = {f['frame']: f['boxes'] for f in preds}
     gt_by_frame = {f['frame']: f['boxes'] for f in gt}
     all_frames = sorted(set(list(pred_by_frame.keys()) + list(gt_by_frame.keys())))
@@ -1357,13 +1356,11 @@ def bias_report(preds, gt):
               f"{md(d['rl']):>6.2f}{md(d['rw']):>6.2f}{md(d['rh']):>6.2f}  {math.degrees(md(d['dyaw'])):>8.1f}")
 
 
-def print_evaluation_report(stats, iou_accept=None, iou_edit=0.25):
+def print_evaluation_report(stats, iou_accept=0.7, iou_edit=0.25):
     """Print formatted evaluation report."""
     total_gt = stats['total_gt']
     total_pred = stats['total_pred']
-    if iou_accept is None:
-        iou_accept = ACCEPT_IOU_BY_CLASS
-    acc_txt = "theo class (xe 0.7, vật nhỏ 0.5)" if isinstance(iou_accept, dict) else str(iou_accept)
+    acc_txt = "theo class" if isinstance(iou_accept, dict) else str(iou_accept)
 
     print("\n" + "=" * 65)
     print("  EVALUATION REPORT — Annotation Efficiency")
