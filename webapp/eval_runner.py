@@ -40,6 +40,31 @@ def main():
 
     print("[4/4] So sánh output tool vs GT...")
     stats = run.evaluate_predictions(preds, gt)
+    tg = max(stats["total_gt"], 1)
+    print("  TRƯỚC hiệu chỉnh: giữ %.1f%% | sửa %.1f%% | sót %.1f%%"
+          % (stats["accept"] / tg * 100, stats["edit"] / tg * 100, stats["miss"] / tg * 100))
+    run.bias_report(preds, gt)
+
+    # Tự suy hiệu chỉnh hệ thống theo GT (size/z/yaw) rồi áp -> giảm phần "cần sửa"
+    calib = run.compute_calibration(preds, gt)
+    if calib:
+        preds_cal = run.apply_calibration(preds, calib)
+        stats_cal = run.evaluate_predictions(preds_cal, gt)
+        print("  SAU hiệu chỉnh:   giữ %.1f%% | sửa %.1f%% | sót %.1f%%"
+              % (stats_cal["accept"] / tg * 100, stats_cal["edit"] / tg * 100, stats_cal["miss"] / tg * 100))
+        with open(os.path.join(os.path.dirname(out_json), "box_calib.json"), "w") as cf:
+            json.dump(calib, cf, ensure_ascii=False, indent=2)
+        if stats_cal["edit"] <= stats["edit"]:
+            home_calib = os.path.expanduser("~/box_calib.json")
+            with open(home_calib, "w") as cf:
+                json.dump(calib, cf, ensure_ascii=False, indent=2)
+            print("  Đã lưu hiệu chỉnh -> %s (auto-label sẽ tự áp từ lần sau)" % home_calib)
+            stats = stats_cal  # hiển thị kết quả đã tối ưu
+        else:
+            print("  (hiệu chỉnh không cải thiện -> giữ kết quả gốc)")
+    else:
+        print("  (không đủ mẫu để hiệu chỉnh)")
+
     run.save_evaluation_json(stats, out_json, model_name="tool")
     print("EVAL_DONE")
 

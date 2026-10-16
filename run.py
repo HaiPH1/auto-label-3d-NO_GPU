@@ -1240,6 +1240,105 @@ def evaluate_predictions(preds, gt, iou_accept=0.7, iou_edit=0.25):
     return stats
 
 
+def _match_pairs(preds, gt, iou_min=0.1):
+    """Ghép pred↔GT cùng class theo IoU (Hungarian). Trả list (cls, pred_box, gt_box, iou)."""
+    pred_by = {f['frame']: f['boxes'] for f in preds}
+    gt_by = {f['frame']: f['boxes'] for f in gt}
+    pairs = []
+    for frame in sorted(set(list(pred_by.keys()) + list(gt_by.keys()))):
+        pb = pred_by.get(frame, [])
+        gb = gt_by.get(frame, [])
+        for cls in set([b['label'] for b in pb] + [b['label'] for b in gb]):
+            p = [b for b in pb if b['label'] == cls]
+            g = [b for b in gb if b['label'] == cls]
+            if not p or not g:
+                continue
+            m = np.zeros((len(p), len(g)))
+            for i, pbx in enumerate(p):
+                for j, gbx in enumerate(g):
+                    m[i, j] = iou_3d(pbx, gbx)
+            ri, ci = linear_sum_assignment(-m)
+            for r, c in zip(ri, ci):
+                if m[r, c] >= iou_min:
+                    pairs.append((cls, p[r], g[c], float(m[r, c])))
+    return pairs
+
+
+def compute_calibration(preds, gt, iou_min=0.25, min_n=5):
+    """Suy hiệu chỉnh hệ thống theo class từ cặp pred↔GT đã match:
+    scale size [sx,sy,sz] (median gt/pred), offset z (median), offset yaw (median,
+    gập về ±90° để bỏ nhập nhằng 180°). Chỉ nhận class có >= min_n mẫu."""
+    acc = {}
+    for cls, P, G, _iou in _match_pairs(preds, gt, iou_min):
+        d = acc.setdefault(cls, {'sx': [], 'sy': [], 'sz': [], 'dz': [], 'dyaw': []})
+        for k, key in enumerate(('sx', 'sy', 'sz')):
+            if P['size'][k] > 1e-3:
+                d[key].append(G['size'][k] / P['size'][k])
+        d['dz'].append(G['center'][2] - P['center'][2])
+        diff = normalize_angle(G['yaw'] - P['yaw'])
+        if diff > math.pi / 2:
+            diff -= math.pi
+        elif diff < -math.pi / 2:
+            diff += math.pi
+        d['dyaw'].append(diff)
+    calib = {}
+    for cls, d in acc.items():
+        if len(d['dz']) < min_n:
+            continue
+        calib[cls] = {
+            'scale': [float(np.median(d['sx'])), float(np.median(d['sy'])), float(np.median(d['sz']))],
+            'dz': float(np.median(d['dz'])),
+            'dyaw': float(np.median(d['dyaw'])),
+            'n': len(d['dz']),
+        }
+    return calib
+
+
+def apply_calibration(preds, calib):
+    """Áp hiệu chỉnh per-class vào preds (trả bản mới, không sửa gốc)."""
+    import copy
+    out = copy.deepcopy(preds)
+    for f in out:
+        for b in f.get('boxes', []):
+            c = calib.get(b['label'])
+            if not c:
+                continue
+            s = c.get('scale', [1, 1, 1])
+            b['size'] = [b['size'][0] * s[0], b['size'][1] * s[1], b['size'][2] * s[2]]
+            b['center'] = [b['center'][0], b['center'][1], b['center'][2] + c.get('dz', 0.0)]
+            b['yaw'] = normalize_angle(b['yaw'] + c.get('dyaw', 0.0))
+    return out
+
+
+def bias_report(preds, gt):
+    """In bảng lệch hệ thống theo class (giúp biết 'edit' do size/z/yaw/vị trí)."""
+    pairs = _match_pairs(preds, gt, iou_min=0.25)
+    if not pairs:
+        print("  (không có cặp match để phân tích bias)")
+        return
+    by = {}
+    for cls, P, G, iou in pairs:
+        d = by.setdefault(cls, {'dx': [], 'dy': [], 'dz': [], 'rl': [], 'rw': [], 'rh': [], 'dyaw': []})
+        d['dx'].append(G['center'][0] - P['center'][0])
+        d['dy'].append(G['center'][1] - P['center'][1])
+        d['dz'].append(G['center'][2] - P['center'][2])
+        for k, key in zip(range(3), ('rl', 'rw', 'rh')):
+            if P['size'][k] > 1e-3:
+                d[key].append(G['size'][k] / P['size'][k])
+        diff = normalize_angle(G['yaw'] - P['yaw'])
+        if diff > math.pi / 2:
+            diff -= math.pi
+        elif diff < -math.pi / 2:
+            diff += math.pi
+        d['dyaw'].append(abs(diff))
+    print(f"\n  --- Bias theo class (median, n cặp) ---")
+    print(f"  {'class':<14}{'n':>4}  {'Δx':>6}{'Δy':>6}{'Δz':>6}  {'l×':>6}{'w×':>6}{'h×':>6}  {'|Δyaw|°':>8}")
+    for cls, d in sorted(by.items()):
+        md = lambda a: float(np.median(a)) if a else 0.0
+        print(f"  {cls:<14}{len(d['dz']):>4}  {md(d['dx']):>6.2f}{md(d['dy']):>6.2f}{md(d['dz']):>6.2f}  "
+              f"{md(d['rl']):>6.2f}{md(d['rw']):>6.2f}{md(d['rh']):>6.2f}  {math.degrees(md(d['dyaw'])):>8.1f}")
+
+
 def print_evaluation_report(stats, iou_accept=0.7, iou_edit=0.25):
     """Print formatted evaluation report."""
     total_gt = stats['total_gt']
@@ -1533,6 +1632,18 @@ def step3_upload(config, preds, calib_path=None, tracking_cfg=None,
     if tracking_cfg.get('enabled', True):
         max_dist = tracking_cfg.get('max_distance', 5.0)
         preds = track_objects(preds, max_dist=max_dist)
+
+    # Hiệu chỉnh hệ thống box theo GT (file box_calib.json) — bám GT hơn, giảm "cần sửa"
+    box_calib_path = os.environ.get("BOX_CALIB", os.path.expanduser("~/box_calib.json"))
+    if os.path.exists(box_calib_path):
+        try:
+            with open(box_calib_path) as _bf:
+                _bc = json.load(_bf)
+            if _bc:
+                preds = apply_calibration(preds, _bc)
+                print(f"  Box calibration: áp {len(_bc)} class ({box_calib_path})")
+        except Exception as e:  # noqa: BLE001 — lỗi calib không chặn upload
+            print(f"  [WARN] Bỏ qua box calibration: {e}")
 
     calib = None
     if calib_path:
